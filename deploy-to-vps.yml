@@ -1,0 +1,149 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.7.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          
+      - name: Deploy to VPS
+        env:
+          VPS_HOST: vps-d067f247.vps.ovh.ca
+          VPS_USERNAME: debian
+        run: |
+          # Add VPS host key to known_hosts
+          mkdir -p ~/.ssh
+          ssh-keyscan -H $VPS_HOST >> ~/.ssh/known_hosts
+          
+          # Create deployment directory
+          ssh $VPS_USERNAME@$VPS_HOST "mkdir -p ~/pacer-deployment"
+          
+          # Create docker-compose file on the VPS
+          ssh $VPS_USERNAME@$VPS_HOST "cat > ~/pacer-deployment/docker-compose.yml << 'EOL'
+          version: '3'
+          
+          services:
+            backend:
+              image: ghcr.io/pm78/pacer-sales-game-backend:latest
+              container_name: pacer_backend
+              environment:
+                - PACER_DATABASE_URL=sqlite:///./pacer_game.db
+                - SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}
+                - ACCESS_TOKEN_EXPIRE_MINUTES=1440
+              volumes:
+                - backend_data:/app/data
+              ports:
+                - '8001:8001'
+              restart: always
+          
+            frontend:
+              image: ghcr.io/pm78/pacer-sales-game-frontend:latest
+              container_name: pacer_frontend
+              ports:
+                - '3001:3001'
+              depends_on:
+                - backend
+              restart: always
+              environment:
+                - REACT_APP_API_URL=https://vps-d067f247.vps.ovh.ca/pacer-api
+                - PUBLIC_URL=/pacer
+          
+          volumes:
+            backend_data:
+          EOL"
+          
+          # Create NGINX configuration file
+          ssh $VPS_USERNAME@$VPS_HOST "cat > ~/pacer-deployment/nginx-config.conf << 'EOL'
+          server {
+              listen 80;
+              server_name vps-d067f247.vps.ovh.ca;
+          
+              # Redirect to HTTPS
+              location / {
+                  return 301 https://$host$request_uri;
+              }
+          }
+          
+          server {
+              listen 443 ssl;
+              server_name vps-d067f247.vps.ovh.ca;
+          
+              ssl_certificate /etc/letsencrypt/live/vps-d067f247.vps.ovh.ca/fullchain.pem;
+              ssl_certificate_key /etc/letsencrypt/live/vps-d067f247.vps.ovh.ca/privkey.pem;
+          
+              # Frontend application
+              location /pacer/ {
+                  proxy_pass http://localhost:3001/;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection 'upgrade';
+                  proxy_set_header Host $host;
+                  proxy_cache_bypass $http_upgrade;
+              }
+          
+              # Backend API
+              location /pacer-api/ {
+                  proxy_pass http://localhost:8001/api/;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection 'upgrade';
+                  proxy_set_header Host $host;
+                  proxy_cache_bypass $http_upgrade;
+              }
+          
+              # Root login endpoint
+              location = /login {
+                  proxy_pass http://localhost:8001/login;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection 'upgrade';
+                  proxy_set_header Host $host;
+                  proxy_cache_bypass $http_upgrade;
+              }
+          }
+          EOL"
+          
+          # Create deployment script
+          ssh $VPS_USERNAME@$VPS_HOST "cat > ~/pacer-deployment/deploy.sh << 'EOL'
+          #!/bin/bash
+          
+          echo '===== Starting deployment ====='
+          
+          # Login to GitHub Container Registry
+          echo '${{ secrets.CR_PAT }}' | docker login ghcr.io -u pm78 --password-stdin
+          
+          # Stop and remove existing containers
+          cd ~/pacer-deployment
+          docker-compose down || true
+          
+          # Pull latest images
+          docker-compose pull
+          
+          # Start containers
+          docker-compose up -d
+          
+          # Update NGINX config if it exists
+          if [ -f nginx-config.conf ]; then
+            sudo cp nginx-config.conf /etc/nginx/sites-available/default
+            sudo nginx -t && sudo systemctl reload nginx
+          fi
+          
+          echo '===== Deployment completed ====='
+          EOL"
+          
+          # Make deployment script executable
+          ssh $VPS_USERNAME@$VPS_HOST "chmod +x ~/pacer-deployment/deploy.sh"
+          
+          # Run deployment script
+          ssh $VPS_USERNAME@$VPS_HOST "cd ~/pacer-deployment && ./deploy.sh" 

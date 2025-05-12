@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:13
+    container_name: pacer_db
+    environment:
+      POSTGRES_USER: ${DB_USER:-pacer}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-pacerpassword}
+      POSTGRES_DB: ${DB_NAME:-pacer_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pacer"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    container_name: pacer_backend
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://${DB_USER:-pacer}:${DB_PASSWORD:-pacerpassword}@postgres:5432/${DB_NAME:-pacer_db}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - JWT_SECRET=${JWT_SECRET:-your_jwt_secret_key}
+      - CORS_ORIGINS=http://localhost:3001,http://localhost:81,https://vps-d067f247.vps.ovh.ca
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./backend:/app
+      - /app/venv/
+
+  frontend:
+    build: ./frontend
+    container_name: pacer_frontend
+    restart: always
+    ports:
+      - "81:80"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data: 

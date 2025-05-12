@@ -1,0 +1,9 @@
+{
+  "name": "realtime-api-local",
+  "version": "0.1.0",
+  "description": "Custom implementation of OpenAI's Realtime API client",
+  "main": "index.js",
+  "private": true,
+  "dependencies": {},
+  "peerDependencies": {}
+} 

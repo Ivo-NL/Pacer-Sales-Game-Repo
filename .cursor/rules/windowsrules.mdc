@@ -1,0 +1,8 @@
+---
+description: Rules to take into considerations to run scripts, migrate a database, or push to production
+globs: 
+alwaysApply: false
+---
+* POWERSHELL: I code on Windows. All terminal commands are run in PowerShell. Hence commands like "&&" do not work on PowerShell. Please raplace them with ";".
+
+* CI/CD: ssh and scp do not work on this PC. They are bloked by the firewall of my company. That's why I only use Github action workflow to push my code to production.

@@ -1,0 +1,689 @@
+name: Deploy PACER to OVH VPS
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'frontend/**'
+      - 'backend/**'
+      - '.github/workflows/deploy-pacer.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  deploy-pacer:
+    runs-on: ubuntu-latest
+    
+    env:
+      VPS_IP: 51.222.29.215
+      PACER_PATH: /home/debian/pacer
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Build and push backend
+        uses: docker/build-push-action@v4
+        with:
+          context: ./backend
+          push: true
+          tags: ghcr.io/pm78/pacer-sales-game-backend:latest
+      
+      - name: Build and push frontend
+        uses: docker/build-push-action@v4
+        with:
+          context: ./frontend
+          push: true
+          tags: ghcr.io/pm78/pacer-sales-game-frontend:latest
+          no-cache: true
+      
+      - name: Create deployment files
+        run: |
+          # Create docker-compose file for VPS
+          cat > docker-compose.vps.yml << EOF
+          version: '3.8'
+          
+          services:
+            backend:
+              image: ghcr.io/pm78/pacer-sales-game-backend:latest
+              container_name: pacer_backend
+              restart: always
+              environment:
+                - PACER_DATABASE_URL=sqlite:///./pacer_game.db
+                - OPENAI_API_KEY=\${OPENAI_API_KEY}
+                - JWT_SECRET=\${JWT_SECRET}
+                - CORS_ORIGINS=https://vps-d067f247.vps.ovh.ca,https://vps-d067f247.vps.ovh.ca/pacer
+              volumes:
+                - ./backend_data:/app/data
+              ports:
+                - "8001:8001"
+          EOF
+          
+          # Create deploy script with automatic container updates
+          cat > deploy-pacer.sh << EOF
+          #!/bin/bash
+          
+          # Load environment variables
+          set -a
+          source .env
+          set +a
+          
+          echo "Authenticating with GitHub Container Registry..."
+          echo "\${CR_PAT}" | docker login ghcr.io -u pm78 --password-stdin
+          
+          echo "Pulling latest Docker images..."
+          docker-compose -f docker-compose.vps.yml pull
+          
+          echo "Stopping existing containers..."
+          docker-compose -f docker-compose.vps.yml down
+          
+          echo "Starting backend container with new image..."
+          docker-compose -f docker-compose.vps.yml up -d
+          
+          echo "Waiting for backend to start properly (15 seconds)..."
+          sleep 15
+          
+          echo "Creating test user account..."
+          docker exec pacer_backend python /app/create_test_user.py
+          
+          # Create user data initialization script (with proper progress level limits)
+          cat > fix_user_data.py << 'EOL'
+          #!/usr/bin/env python3
+          import os
+          import sys
+          import sqlite3
+          from datetime import datetime
+
+          def find_database():
+              """Find the SQLite database file."""
+              paths = [
+                  '/app/data/pacer_game.db',
+                  '/app/pacer_game.db',
+                  '/app/sql_app.db',
+                  '/app/app/pacer_game.db'
+              ]
+              
+              for path in paths:
+                  if os.path.exists(path):
+                      print(f"Found database at {path}")
+                      return path
+              
+              # If no database is found, look more broadly
+              for root, dirs, files in os.walk('/app'):
+                  for file in files:
+                      if file.endswith('.db'):
+                          path = os.path.join(root, file)
+                          print(f"Found database at {path}")
+                          return path
+              
+              print("Database not found!")
+              return None
+          
+          def fix_user_data(db_path, email):
+              """Fix user data records for the specified user."""
+              print(f"Fixing data for user {email} in {db_path}")
+              
+              conn = sqlite3.connect(db_path)
+              cursor = conn.cursor()
+              
+              # Get table names
+              cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+              tables = [table[0] for table in cursor.fetchall()]
+              print(f"Found tables: {tables}")
+              
+              # First, find the user ID
+              user_id = None
+              user_table = None
+              
+              # Check if users table exists
+              if 'users' in tables:
+                  user_table = 'users'
+              elif 'user' in tables:
+                  user_table = 'user'
+              
+              if user_table:
+                  print(f"Using '{user_table}' table to find user")
+                  
+                  # Check if created_at column exists
+                  cursor.execute(f"PRAGMA table_info({user_table})")
+                  columns = [col[1] for col in cursor.fetchall()]
+                  print(f"Columns in {user_table}: {columns}")
+                  
+                  cursor.execute(f"SELECT id FROM {user_table} WHERE email = ?", (email,))
+                  result = cursor.fetchone()
+                  if result:
+                      user_id = result[0]
+                      print(f"Found user with ID: {user_id}")
+                      
+                      # Ensure created_at field is set
+                      if 'created_at' in columns:
+                          cursor.execute(f"SELECT created_at FROM {user_table} WHERE id = ?", (user_id,))
+                          created_at = cursor.fetchone()[0]
+                          
+                          if created_at is None:
+                              timestamp = datetime.now().isoformat()
+                              cursor.execute(f"UPDATE {user_table} SET created_at = ? WHERE id = ?", (timestamp, user_id))
+                              print(f"Updated created_at to {timestamp}")
+                  else:
+                      print(f"Error: User {email} not found in {user_table} table")
+                      return False
+              else:
+                  print("Error: No user table found")
+                  return False
+              
+              # Fix progress data with values within limits (≤ 10)
+              if 'progress' in tables:
+                  print("Working with progress table")
+                  
+                  # Get progress table schema
+                  cursor.execute("PRAGMA table_info(progress)")
+                  columns = cursor.fetchall()
+                  column_names = [col[1] for col in columns]
+                  print(f"Progress table columns: {column_names}")
+                  
+                  # Check if progress exists for this user
+                  cursor.execute("SELECT id FROM progress WHERE user_id = ?", (user_id,))
+                  progress = cursor.fetchone()
+                  
+                  # Set all level values to 8 (within the limit of 10)
+                  if progress:
+                      print(f"Progress record exists for user {user_id}, updating with values ≤ 10")
+                      cursor.execute("""
+                          UPDATE progress 
+                          SET 
+                             prospect_level = 8,
+                             assess_level = 8,
+                             challenge_level = 8,
+                             execute_level = 8,
+                             retain_level = 8,
+                             total_sessions_completed = 5,
+                             total_score = 8.0,
+                             rank = 'Expert',
+                             updated_at = ?
+                          WHERE user_id = ?
+                      """, (datetime.now().isoformat(), user_id))
+                      print("Updated progress with proper values within limits")
+                  else:
+                      print(f"Creating progress record for user {user_id}")
+                      cursor.execute("""
+                          INSERT INTO progress 
+                          (user_id, prospect_level, assess_level, challenge_level, execute_level, retain_level, 
+                           total_sessions_completed, total_score, rank, updated_at)
+                          VALUES (?, 8, 8, 8, 8, 8, 5, 8.0, 'Expert', ?)
+                      """, (user_id, datetime.now().isoformat()))
+                      print(f"Created progress record with proper values within limits")
+              
+              # Create example game sessions if they don't exist
+              if 'game_sessions' in tables:
+                  print("Checking game_sessions table")
+                  
+                  # Check if user has any sessions
+                  cursor.execute("SELECT id FROM game_sessions WHERE user_id = ?", (user_id,))
+                  existing_sessions = cursor.fetchone()
+                  
+                  if not existing_sessions and 'scenarios' in tables:
+                      # Get first scenario
+                      cursor.execute("SELECT id FROM scenarios LIMIT 1")
+                      scenario = cursor.fetchone()
+                      
+                      if scenario:
+                          scenario_id = scenario[0]
+                          print(f"Creating example game sessions with scenario {scenario_id}")
+                          
+                          current_time = datetime.now().isoformat()
+                          
+                          # Create completed session
+                          cursor.execute("""
+                          INSERT INTO game_sessions 
+                          (user_id, scenario_id, created_at, completed_at, status, score)
+                          VALUES (?, ?, ?, ?, 'completed', 95)
+                          """, (user_id, scenario_id, current_time, current_time))
+                          
+                          # Create active session
+                          cursor.execute("""
+                          INSERT INTO game_sessions 
+                          (user_id, scenario_id, created_at, status)
+                          VALUES (?, ?, ?, 'active')
+                          """, (user_id, scenario_id, current_time))
+                          
+                          print("Created example game sessions")
+              
+              conn.commit()
+              print("Fixed user data in database")
+              
+              conn.close()
+              return True
+          
+          if __name__ == "__main__":
+              print("Starting user data fix")
+              
+              # Default user email
+              email = "testuser@example.com"
+              
+              # Override with command line arg if provided
+              if len(sys.argv) > 1:
+                  email = sys.argv[1]
+              
+              db_path = find_database()
+              if db_path:
+                  fix_user_data(db_path, email)
+              else:
+                  print("Cannot proceed without database")
+                  sys.exit(1)
+              
+              print("User data fix completed")
+          EOL
+          
+          echo "Initializing user data with proper values..."
+          docker cp fix_user_data.py pacer_backend:/app/
+          docker exec pacer_backend python /app/fix_user_data.py
+          
+          # Create script to seed scenarios
+          cat > seed_scenarios.py << 'EOL'
+          #!/usr/bin/env python3
+          import os
+          import sys
+          import sqlite3
+          from datetime import datetime
+
+          def find_database():
+              """Find the SQLite database file."""
+              paths = [
+                  '/app/data/pacer_game.db',
+                  '/app/pacer_game.db',
+                  '/app/sql_app.db',
+                  '/app/app/pacer_game.db'
+              ]
+              
+              for path in paths:
+                  if os.path.exists(path):
+                      print(f"Found database at {path}")
+                      return path
+              
+              # If no database is found, look more broadly
+              for root, dirs, files in os.walk('/app'):
+                  for file in files:
+                      if file.endswith('.db'):
+                          path = os.path.join(root, file)
+                          print(f"Found database at {path}")
+                          return path
+              
+              print("Database not found!")
+              return None
+          
+          def seed_scenarios(db_path):
+              """Seed basic scenarios data."""
+              print(f"Seeding scenarios in {db_path}")
+              
+              conn = sqlite3.connect(db_path)
+              cursor = conn.cursor()
+              
+              # Check if scenarios already exist
+              cursor.execute("SELECT COUNT(*) FROM scenarios")
+              existing_count = cursor.fetchone()[0]
+              
+              if existing_count > 0:
+                  print(f"Database already contains {existing_count} scenarios. Skipping seed.")
+                  conn.close()
+                  return True
+              
+              # Create basic scenarios
+              timestamp = datetime.now().isoformat()
+              scenarios = [
+                  {
+                      "title": "Introduction to Prospecting",
+                      "description": "Learn the basics of prospecting in the payment processing industry.",
+                      "difficulty": 1,
+                      "pacer_stage": "P",
+                      "product_type": "Issuing Solutions",
+                      "industry": "Banking",
+                      "region": "Global",
+                      "created_at": timestamp
+                  },
+                  {
+                      "title": "Needs Assessment for Retail",
+                      "description": "Practice assessing client needs in the retail payment space.",
+                      "difficulty": 1,
+                      "pacer_stage": "A",
+                      "product_type": "Acceptance & Authorization",
+                      "industry": "Retail",
+                      "region": "Global",
+                      "created_at": timestamp
+                  },
+                  {
+                      "title": "Challenging the Status Quo",
+                      "description": "Learn to challenge client assumptions about payment processing.",
+                      "difficulty": 2,
+                      "pacer_stage": "C",
+                      "product_type": "Digital Services",
+                      "industry": "Fintech",
+                      "region": "Global",
+                      "created_at": timestamp
+                  },
+                  {
+                      "title": "Executing the Deal",
+                      "description": "Practice closing techniques in complex payment solution sales.",
+                      "difficulty": 2,
+                      "pacer_stage": "E",
+                      "product_type": "Instant Payments",
+                      "industry": "E-commerce",
+                      "region": "Global",
+                      "created_at": timestamp
+                  },
+                  {
+                      "title": "Building Long-term Relationships",
+                      "description": "Develop strategies for customer retention and account growth.",
+                      "difficulty": 1,
+                      "pacer_stage": "R",
+                      "product_type": "Fraud Risk Management",
+                      "industry": "Banking",
+                      "region": "Global",
+                      "created_at": timestamp
+                  },
+              ]
+              
+              # Insert scenarios and track IDs
+              scenario_ids = {}
+              for index, scenario in enumerate(scenarios, 1):
+                  cursor.execute("""
+                      INSERT INTO scenarios (
+                          title, description, difficulty, pacer_stage, 
+                          product_type, industry, region, created_at
+                      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                  """, (
+                      scenario["title"], 
+                      scenario["description"], 
+                      scenario["difficulty"], 
+                      scenario["pacer_stage"], 
+                      scenario["product_type"], 
+                      scenario["industry"], 
+                      scenario["region"],
+                      scenario["created_at"]
+                  ))
+                  scenario_ids[index] = cursor.lastrowid
+              
+              # Create client personas for each scenario
+              client_personas = [
+                  {
+                      "scenario_id": 1,  # Introduction to Prospecting
+                      "name": "Alex Johnson",
+                      "role": "Head of Digital Banking",
+                      "company": "FinBank",
+                      "personality_traits": "Analytical, cautious, detail-oriented",
+                      "pain_points": "Legacy systems, high operational costs, customer complaints about card issuance time",
+                      "decision_criteria": "ROI, implementation timeline, compliance features",
+                      "created_at": timestamp
+                  },
+                  {
+                      "scenario_id": 2,  # Needs Assessment for Retail
+                      "name": "Sarah Williams",
+                      "role": "VP of Operations",
+                      "company": "RetailGiant",
+                      "personality_traits": "Practical, results-driven, time-conscious",
+                      "pain_points": "Checkout delays, high transaction fees, fraud concerns",
+                      "decision_criteria": "Speed, cost reduction, customer experience improvement",
+                      "created_at": timestamp
+                  },
+                  {
+                      "scenario_id": 3,  # Challenging the Status Quo
+                      "name": "Michael Chen",
+                      "role": "CTO",
+                      "company": "TechPay",
+                      "personality_traits": "Innovative, skeptical, technology-focused",
+                      "pain_points": "Integration complexity, competitive pressure, scaling challenges",
+                      "decision_criteria": "Technical superiority, flexibility, future-proofing",
+                      "created_at": timestamp
+                  },
+                  {
+                      "scenario_id": 4,  # Executing the Deal
+                      "name": "Jessica Rodriguez",
+                      "role": "CFO",
+                      "company": "ShopNow",
+                      "personality_traits": "Direct, financially focused, strategic",
+                      "pain_points": "International payment issues, chargeback rates, compliance costs",
+                      "decision_criteria": "Proven ROI, contract flexibility, global capabilities",
+                      "created_at": timestamp
+                  },
+                  {
+                      "scenario_id": 5,  # Building Long-term Relationships
+                      "name": "David Wilson",
+                      "role": "Head of Customer Experience",
+                      "company": "GlobalBank",
+                      "personality_traits": "Relationship-oriented, customer-focused, collaborative",
+                      "pain_points": "Customer retention, upsell opportunities, service consistency",
+                      "decision_criteria": "Customer satisfaction metrics, account management approach, innovation roadmap",
+                      "created_at": timestamp
+                  }
+              ]
+              
+              for persona in client_personas:
+                  real_scenario_id = scenario_ids.get(persona["scenario_id"])
+                  if real_scenario_id:
+                      cursor.execute("""
+                          INSERT INTO client_personas (
+                              scenario_id, name, role, company, 
+                              personality_traits, pain_points, decision_criteria, created_at
+                          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                      """, (
+                          real_scenario_id,
+                          persona["name"],
+                          persona["role"],
+                          persona["company"],
+                          persona["personality_traits"],
+                          persona["pain_points"],
+                          persona["decision_criteria"],
+                          persona["created_at"]
+                      ))
+              
+              conn.commit()
+              print(f"Successfully created {len(scenarios)} scenarios and {len(client_personas)} client personas")
+              conn.close()
+              return True
+          
+          if __name__ == "__main__":
+              print("Starting scenarios seed")
+              
+              db_path = find_database()
+              if db_path:
+                  success = seed_scenarios(db_path)
+                  print("Scenarios seed complete" if success else "Scenarios seed failed")
+              else:
+                  print("Cannot proceed without database")
+                  sys.exit(1)
+          EOL
+          
+          echo "Seeding scenarios data..."
+          docker cp seed_scenarios.py pacer_backend:/app/
+          docker exec pacer_backend python /app/seed_scenarios.py
+          
+          echo "Extracting frontend static files..."
+          docker create --name temp_frontend ghcr.io/pm78/pacer-sales-game-frontend:latest
+          mkdir -p ./frontend-static
+          docker cp temp_frontend:/usr/share/nginx/html/. ./frontend-static/
+          docker rm temp_frontend
+          
+          echo "Setting proper permissions on static files..."
+          chmod -R 755 ./frontend-static
+          
+          # Apply NGINX configuration
+          ./setup-nginx.sh
+          
+          echo "Checking container status:"
+          docker ps
+          
+          echo "Checking backend logs for errors:"
+          docker logs pacer_backend --tail 50
+          
+          echo "Checking if backend API is responding:"
+          curl -v http://localhost:8001/api/health || echo "Backend health check failed"
+          
+          echo "Deployment completed successfully!"
+          EOF
+          
+          chmod +x deploy-pacer.sh
+
+      - name: Set up environment file
+        run: |
+          echo "# Database Configuration" > .env.production
+          echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> .env.production
+          echo "JWT_SECRET=${{ secrets.PACER_JWT_SECRET }}" >> .env.production
+          echo "DOMAIN=vps-d067f247.vps.ovh.ca" >> .env.production
+          echo "ENVIRONMENT=production" >> .env.production
+          echo "LOG_LEVEL=INFO" >> .env.production
+          echo "CR_PAT=${{ secrets.CR_PAT }}" >> .env.production
+
+      - name: Create setup scripts
+        run: |
+          # Create a setup script for nginx
+          cat > setup-nginx.sh << 'EOF'
+          #!/bin/bash
+
+          # Copy the nginx configuration
+          sudo cp nginx-pacer.conf /etc/nginx/sites-available/default
+
+          # Test the configuration
+          sudo nginx -t
+
+          # If test is successful, reload nginx
+          if [ $? -eq 0 ]; then
+              sudo systemctl reload nginx
+              echo "NGINX configuration updated successfully"
+          else
+              echo "NGINX configuration test failed, not reloading"
+              exit 1
+          fi
+          EOF
+          
+          # Create NGINX configuration
+          cat > nginx-pacer.conf << 'EOF'
+          server {
+              listen 80;
+              listen [::]:80;
+              server_name vps-d067f247.vps.ovh.ca;
+              
+              # Redirect HTTP to HTTPS
+              return 301 https://$host$request_uri;
+          }
+          
+          server {
+              listen 443 ssl;
+              listen [::]:443 ssl;
+              server_name vps-d067f247.vps.ovh.ca;
+              
+              ssl_certificate /etc/letsencrypt/live/vps-d067f247.vps.ovh.ca/fullchain.pem;
+              ssl_certificate_key /etc/letsencrypt/live/vps-d067f247.vps.ovh.ca/privkey.pem;
+              
+              # SSL configuration
+              ssl_protocols TLSv1.2 TLSv1.3;
+              ssl_prefer_server_ciphers on;
+              ssl_ciphers ECDHE-RSA-AES256-GCM-SHA512:DHE-RSA-AES256-GCM-SHA512:ECDHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-SHA384;
+              ssl_session_timeout 1d;
+              ssl_session_cache shared:SSL:50m;
+              ssl_stapling on;
+              ssl_stapling_verify on;
+              
+              # Global settings
+              client_max_body_size 20M;
+              
+              # Existing app routes (TTT9)
+              location / {
+                  proxy_pass http://localhost:3000;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection "upgrade";
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+              
+              # PACER - root level redirect
+              location = /pacer {
+                  return 301 /pacer/;
+              }
+              
+              # Handle any double /pacer/pacer/ paths
+              location ~ ^/pacer/pacer/(.*)$ {
+                  return 301 /pacer/$1;
+              }
+              
+              # PACER - frontend (static files)
+              location /pacer/ {
+                  alias /home/debian/pacer/frontend-static/;
+                  try_files $uri $uri/ /pacer/index.html;
+              }
+              
+              # PACER - backend API
+              location /pacer-api/ {
+                  rewrite ^/pacer-api/(.*) /api/$1 break;
+                  proxy_pass http://localhost:8001;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection "upgrade";
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+                  proxy_read_timeout 300s;
+                  proxy_buffering off;
+              }
+              
+              # PACER - docs
+              location /pacer-docs/ {
+                  proxy_pass http://localhost:8001/docs/;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection "upgrade";
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+          }
+          EOF
+
+          chmod +x setup-nginx.sh
+
+      - name: Create deployment package
+        run: |
+          # Create a tar package
+          tar -czf pacer-deploy.tar.gz docker-compose.vps.yml deploy-pacer.sh nginx-pacer.conf setup-nginx.sh .env.production
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add host key to known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ env.VPS_IP }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to VPS via SSH
+        run: |
+          # Copy deployment files to server
+          scp pacer-deploy.tar.gz debian@${{ env.VPS_IP }}:${{ env.PACER_PATH }}/
+          
+          # Connect to server and run deployment
+          ssh debian@${{ env.VPS_IP }} "cd ${{ env.PACER_PATH }} && \
+            tar -xzf pacer-deploy.tar.gz && \
+            chmod +x deploy-pacer.sh setup-nginx.sh && \
+            cp .env.production .env && \
+            ./deploy-pacer.sh && \
+            echo 'Deployment completed successfully!'" 

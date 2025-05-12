@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    container_name: pacer_backend
+    restart: always
+    environment:
+      - PACER_DATABASE_URL=sqlite:///./pacer_game.db
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - JWT_SECRET=${JWT_SECRET:-your_jwt_secret_key}
+      - CORS_ORIGINS=http://localhost:3001,http://localhost:81,https://vps-d067f247.vps.ovh.ca
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./backend:/app
+      - backend_data:/app/data
+      - /app/venv/
+
+  frontend:
+    build: ./frontend
+    container_name: pacer_frontend
+    restart: always
+    ports:
+      - "81:80"
+    depends_on:
+      - backend
+    environment:
+      - REACT_APP_API_URL=https://vps-d067f247.vps.ovh.ca/pacer-api
+      - PUBLIC_URL=/pacer
+
+volumes:
+  backend_data: 

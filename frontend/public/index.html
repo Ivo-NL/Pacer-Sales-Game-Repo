@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="%PUBLIC_URL%/favicon.ico" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#000000" />
+    <meta
+      name="description"
+      content="PACER Sales Methodology Game for My Company"
+    />
+    <link rel="apple-touch-icon" href="%PUBLIC_URL%/logo192.png" />
+    <link rel="manifest" href="%PUBLIC_URL%/manifest.json" crossorigin="use-credentials" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,400,500,700&display=swap" />
+    <title>PACER Sales Methodology Game</title>
+    <!-- Unregister any active service workers -->
+    <script>
+      // Check if we're having issues with service workers
+      const unregisterServiceWorkers = function() {
+        if ('serviceWorker' in navigator) {
+          navigator.serviceWorker.getRegistrations().then(function(registrations) {
+            for (let registration of registrations) {
+              registration.unregister().then(function(success) {
+                console.log('ServiceWorker unregistered:', success);
+                if (success && window.location.hash !== '#no-reload') {
+                  // Add a flag to prevent infinite reload
+                  window.location.hash = 'no-reload';
+                  // Reload without service worker
+                  window.location.reload();
+                }
+              });
+            }
+          });
+        }
+      };
+      
+      // Immediately unregister service workers
+      unregisterServiceWorkers();
+      
+      // Check for service worker errors
+      window.addEventListener('error', function(event) {
+        if (event.message && (
+          event.message.includes('manifest') || 
+          event.message.includes('service') || 
+          event.message.includes('worker')
+        )) {
+          console.error('Service worker related error detected:', event.message);
+          unregisterServiceWorkers();
+        }
+      });
+      
+      // Monitor network changes
+      window.addEventListener('online', function() {
+        console.log('Browser is now online');
+      });
+      
+      window.addEventListener('offline', function() {
+        console.log('Browser is now offline');
+      });
+    </script>
+  </head>
+  <body>
+    <noscript>You need to enable JavaScript to run this app.</noscript>
+    <div id="root"></div>
+    <!-- We're disabling the service worker completely for now -->
+    <!--
+    <script>
+      if ('serviceWorker' in navigator) {
+        // Delay service worker registration until after page load
+        window.addEventListener('load', function() {
+          var isServiceWorkerActive = false;
+          
+          // Only register if not already active
+          navigator.serviceWorker.getRegistration().then(function(registration) {
+            isServiceWorkerActive = !!registration;
+            
+            if (!isServiceWorkerActive) {
+              navigator.serviceWorker.register('/service-worker.js')
+                .then(function(registration) {
+                  console.log('ServiceWorker registration successful with scope: ', registration.scope);
+                })
+                .catch(function(err) {
+                  console.error('ServiceWorker registration failed: ', err);
+                });
+            }
+          }).catch(function(err) {
+            console.error('Error checking service worker registration: ', err);
+          });
+        });
+      }
+    </script>
+    -->
+  </body>
+</html> 

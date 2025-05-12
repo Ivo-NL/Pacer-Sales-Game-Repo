@@ -1,0 +1,19 @@
+[Unit]
+Description=PACER Deployment Webhook Server
+After=network.target
+
+[Service]
+User=debian
+WorkingDirectory=/home/debian/webhook-server
+ExecStart=/usr/bin/node /home/debian/webhook-server/deploy-webhook.js
+Restart=always
+RestartSec=10
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=pacer-webhook
+Environment=NODE_ENV=production
+Environment=DEPLOY_TOKEN=your-secure-token-here
+Environment=REPOSITORY=your-username/pacer
+
+[Install]
+WantedBy=multi-user.target 

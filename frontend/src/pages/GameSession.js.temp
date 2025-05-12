@@ -1,0 +1,249 @@
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import {
+  Container, Grid, Typography, Box, Button, CircularProgress, Paper,
+  TextField, Divider, LinearProgress, Chip, Card, CardContent, Alert,
+  Dialog, DialogTitle, DialogContent, DialogContentText, DialogActions,
+  Avatar, Radio, RadioGroup, FormControlLabel, FormControl, Tooltip,
+  IconButton, Menu, MenuItem, useTheme, Snackbar, ListItemIcon, ListItemText,
+  Switch, FormGroup
+} from '@mui/material';
+import { useParams, useNavigate } from 'react-router-dom';
+import SendIcon from '@mui/icons-material/Send';
+import AssessmentIcon from '@mui/icons-material/Assessment';
+import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
+import AccessTimeIcon from '@mui/icons-material/AccessTime';
+import WarningIcon from '@mui/icons-material/Warning';
+import AlarmIcon from '@mui/icons-material/Alarm';
+import PauseIcon from '@mui/icons-material/Pause';
+import PlayArrowIcon from '@mui/icons-material/PlayArrow';
+import CheckCircleIcon from '@mui/icons-material/CheckCircle';
+import InfoIcon from '@mui/icons-material/Info';
+import FlagIcon from '@mui/icons-material/Flag';
+import TimerIcon from '@mui/icons-material/Timer';
+import MoreVertIcon from '@mui/icons-material/MoreVert';
+import MicIcon from '@mui/icons-material/Mic';
+import MicOffIcon from '@mui/icons-material/MicOff';
+import VolumeUpIcon from '@mui/icons-material/VolumeUp';
+import VolumeOffIcon from '@mui/icons-material/VolumeOff';
+import StopIcon from '@mui/icons-material/Stop';
+import ExitToAppIcon from '@mui/icons-material/ExitToApp';
+import EventIcon from '@mui/icons-material/Event';
+import LogoutIcon from '@mui/icons-material/Logout';
+import apiService from '../services/api';
+import FeedbackCard from '../components/FeedbackCard'; 
+import SettingsVoiceIcon from '@mui/icons-material/SettingsVoice';
+
+const GameSession = () => {
+  const { sessionId } = useParams();
+  const navigate = useNavigate();
+  const theme = useTheme();
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [isResponseLoading, setIsResponseLoading] = useState(false);
+  const [audioPlayback, setAudioPlayback] = useState(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [mediaRecorder, setMediaRecorder] = useState(null);
+  const [isTransmitting, setIsTransmitting] = useState(false);
+  const [isRealtimeWsConnected, setIsRealtimeWsConnected] = useState(false);
+  const [realtimeWebSocket, setRealtimeWebSocket] = useState(null);
+  const [cleanupFunctions, setCleanupFunctions] = useState([]);
+  
+  // Add handleSnackbar function
+  const handleSnackbar = (message, severity = 'info') => {
+    // Implementation
+    console.log(`${severity}: ${message}`);
+  };
+
+  // Play audio from blob
+  const playAudioFromBlob = (audioBlob) => {
+    try {
+      // Stop any currently playing audio first
+      if (audioPlayback) {
+        audioPlayback.pause();
+      }
+      
+      // Create URL for the blob
+      const audioUrl = URL.createObjectURL(audioBlob);
+      
+      // Create a new audio element
+      const audio = new Audio(audioUrl);
+      
+      // Configure the audio
+      audio.volume = 1.0;
+      
+      // Set up event handlers
+      audio.onended = () => {
+        console.log("Audio playback finished");
+        setIsPlaying(false);
+        
+        // Clean up the URL
+        URL.revokeObjectURL(audioUrl);
+      };
+      
+      audio.onerror = (error) => {
+        console.error("Audio playback error:", error);
+        setIsPlaying(false);
+      };
+      
+      // Start playing
+      audio.play().then(() => {
+        console.log("Audio playback started");
+        setIsPlaying(true);
+        setAudioPlayback(audio);
+      }).catch(error => {
+        console.error("Error playing audio:", error);
+      });
+    } catch (error) {
+      console.error("Error playing audio from blob:", error);
+    }
+  };
+  
+  // Play audio from base64 string
+  const playAudioFromBase64 = (base64Audio) => {
+    try {
+      // Convert base64 to array buffer
+      const binaryString = window.atob(base64Audio);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      
+      // Create a blob from the array buffer
+      const audioBlob = new Blob([bytes.buffer], { type: 'audio/mp3' });
+      
+      // Play the blob
+      playAudioFromBlob(audioBlob);
+    } catch (error) {
+      console.error("Error playing audio from base64:", error);
+    }
+  };
+
+  // Start continuous audio streaming for real-time voice mode
+  const startContinuousAudioStream = async () => {
+    try {
+      console.log("Setting up real-time voice streaming");
+
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream, {
+        mimeType: 'audio/webm',
+      });
+      
+      setMediaRecorder(mediaRecorder);
+      
+      // Detect silence for auto-stopping
+      let silenceCount = 0;
+      const silenceThreshold = 5; // Number of silent chunks before stopping
+      let audioContext;
+      let analyser;
+      let dataArray;
+      let silenceDetector;
+      
+      // Set up audio analysis for voice activity detection
+      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioContext.createMediaStreamSource(stream);
+      analyser = audioContext.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(analyser);
+      
+      // Create buffer for analysis
+      const bufferLength = analyser.frequencyBinCount;
+      dataArray = new Uint8Array(bufferLength);
+      
+      // Function to check if audio is silent
+      const checkSilence = () => {
+        if (!analyser) return;
+        
+        analyser.getByteFrequencyData(dataArray);
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          sum += dataArray[i];
+        }
+        
+        const average = sum / dataArray.length;
+        const isSilent = average < 10; // Adjust threshold as needed
+        
+        if (isSilent) {
+          silenceCount++;
+          if (isTransmitting && silenceCount > silenceThreshold) {
+            // Auto-stop if silence detected for a while
+            console.log("Silence detected, stopping transmitting");
+            setIsTransmitting(false);
+          }
+        } else {
+          silenceCount = 0;
+          if (!isTransmitting) {
+            console.log("Voice activity detected, starting transmitting");
+            setIsTransmitting(true);
+          }
+        }
+      };
+      
+      // Start silence detector
+      silenceDetector = setInterval(checkSilence, 100);
+      
+      // Store cleanup functions
+      setCleanupFunctions(prev => [
+        ...prev,
+        () => {
+          clearInterval(silenceDetector);
+          if (audioContext) {
+            audioContext.close();
+          }
+          if (stream) {
+            stream.getTracks().forEach(track => track.stop());
+          }
+        }
+      ]);
+      
+      // Send data when available
+      mediaRecorder.ondataavailable = async (event) => {
+        if (event.data.size > 0 && realtimeWebSocket && realtimeWebSocket.readyState === WebSocket.OPEN && isTransmitting) {
+          try {
+            // If we have audio still playing, send a stop signal first
+            if (audioPlayback && !audioPlayback.paused && !audioPlayback.ended) {
+              console.log("Interrupting AI speech");
+              
+              // Send interrupt signal to stop AI speech
+              const interruptMessage = {
+                type: "speech.interruption"
+              };
+              realtimeWebSocket.send(JSON.stringify(interruptMessage));
+              
+              // Also stop local audio playback
+              audioPlayback.pause();
+              audioPlayback.currentTime = 0;
+            }
+            
+            // Send the audio data
+            realtimeWebSocket.send(event.data);
+          } catch (error) {
+            console.error("Error sending audio data:", error);
+          }
+        }
+      };
+
+      // Start recording
+      mediaRecorder.start(1000);  // Capture in 1-second chunks
+      
+      // Store references for cleanup
+      setMediaRecorder(mediaRecorder);
+      
+      console.log("Continuous audio streaming started");
+    } catch (error) {
+      console.error("Error starting continuous audio stream:", error);
+      handleSnackbar("Error accessing microphone: " + error.message, "error");
+    }
+  };
+
+  // Example UI rendering
+  return (
+    <Container maxWidth="lg" sx={{ mt: 4, mb: 4 }}>
+      <Typography variant="h4">Game Session</Typography>
+      {/* Your component JSX here */}
+    </Container>
+  );
+};
+
+export default GameSession; 

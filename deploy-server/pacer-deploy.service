@@ -1,0 +1,19 @@
+[Unit]
+Description=PACER Deployment Server
+After=network.target
+
+[Service]
+Type=simple
+User=debian
+WorkingDirectory=/home/debian/deploy-server
+ExecStart=/bin/bash /home/debian/deploy-server/run.sh
+Restart=always
+RestartSec=10
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=pacer-deploy
+Environment=ADMIN_USERNAME=admin
+Environment=ADMIN_PASSWORD=your_secure_password_here
+
+[Install]
+WantedBy=multi-user.target 

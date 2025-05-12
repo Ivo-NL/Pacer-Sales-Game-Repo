@@ -1,0 +1,39 @@
+version: '3'
+
+services:
+  backend:
+    image: ghcr.io/pm78/pacer-sales-game/backend:latest
+    container_name: pacer_backend
+    environment:
+      - PACER_DATABASE_URL=sqlite:///./pacer_game.db
+      - SECRET_KEY=your-secret-key-for-jwt-tokens
+      - ACCESS_TOKEN_EXPIRE_MINUTES=1440
+      - OPENAI_API_KEY=your-openai-api-key
+    volumes:
+      - backend_data:/app/data
+    ports:
+      - "8001:8001"
+    networks:
+      - pacer-network
+    restart: always
+
+  frontend:
+    image: ghcr.io/pm78/pacer-sales-game/frontend:latest
+    container_name: pacer_frontend
+    depends_on:
+      - backend
+    ports:
+      - "3001:3001"
+    networks:
+      - pacer-network
+    environment:
+      - REACT_APP_API_URL=https://vps-d067f247.vps.ovh.ca/pacer-api
+      - PUBLIC_URL=/pacer
+    restart: always
+
+volumes:
+  backend_data:
+
+networks:
+  pacer-network:
+    driver: bridge 

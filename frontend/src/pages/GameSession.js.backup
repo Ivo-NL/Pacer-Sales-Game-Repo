@@ -1,0 +1,1901 @@
+// GameSession.js
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import {
+  Container, Grid, Typography, Box, Button, CircularProgress, Paper,
+  TextField, Divider, LinearProgress, Chip, Card, CardContent, Alert,
+  Dialog, DialogTitle, DialogContent, DialogContentText, DialogActions,
+  Avatar, Radio, RadioGroup, FormControlLabel, FormControl, Tooltip,
+  IconButton, Menu, MenuItem, useTheme, Snackbar, ListItemIcon, ListItemText,
+  Switch, FormGroup, Accordion, AccordionSummary, AccordionDetails, List, ListItem
+} from '@mui/material';
+import { useParams, useNavigate } from 'react-router-dom';
+import SendIcon from '@mui/icons-material/Send';
+import AssessmentIcon from '@mui/icons-material/Assessment';
+import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
+import AccessTimeIcon from '@mui/icons-material/AccessTime';
+import WarningIcon from '@mui/icons-material/Warning';
+import AlarmIcon from '@mui/icons-material/Alarm';
+import PauseIcon from '@mui/icons-material/Pause';
+import PlayArrowIcon from '@mui/icons-material/PlayArrow';
+import CheckCircleIcon from '@mui/icons-material/CheckCircle';
+import InfoIcon from '@mui/icons-material/Info';
+import FlagIcon from '@mui/icons-material/Flag';
+import TimerIcon from '@mui/icons-material/Timer';
+import MoreVertIcon from '@mui/icons-material/MoreVert';
+import MicIcon from '@mui/icons-material/Mic';
+import MicOffIcon from '@mui/icons-material/MicOff';
+import VolumeUpIcon from '@mui/icons-material/VolumeUp';
+import VolumeOffIcon from '@mui/icons-material/VolumeOff';
+import StopIcon from '@mui/icons-material/Stop';
+import ExitToAppIcon from '@mui/icons-material/ExitToApp';
+import EventIcon from '@mui/icons-material/Event';
+import LogoutIcon from '@mui/icons-material/Logout';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
+import apiService from '../services/api';
+import FeedbackCard from '../components/FeedbackCard'; 
+import SettingsVoiceIcon from '@mui/icons-material/SettingsVoice';
+import useRealtimeVoice from '../components/voice/useRealtimeVoice';
+import { useTimer } from 'react-timer-hook';
+import ScorePanel from '../components/ScorePanel';
+import { computePillars, computeWeightedPillars, calculateEMA, calculateFinalScore } from '../utils/scoreHelpers';
+import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
+import ScienceIcon from '@mui/icons-material/Science';
+import PauseCircleFilledIcon from '@mui/icons-material/PauseCircleFilled';
+import PauseCircleOutlineIcon from '@mui/icons-material/PauseCircleOutline';
+import PlayCircleOutlineIcon from '@mui/icons-material/PlayCircleOutline';
+
+// PACER methodology reference data
+const pacerMethodology = {
+  P: {
+    name: "Prospect",
+    description: "Identify and engage with potential clients.",
+    techniques: [
+      "Use AI-enhanced prospecting techniques (automated searches, market intelligence)",
+      "Identify high-potential leads through referrals and networks",
+      "Leverage personalized outreach strategies",
+      "Apply content marketing as lead generation",
+      "Monitor market triggers for sales opportunities"
+    ]
+  },
+  A: {
+    name: "Assess",
+    description: "Qualify leads and understand client needs.",
+    techniques: [
+      "Apply MEDDIC framework for qualification (Metrics, Economic Buyer, Decision criteria/process, Identify pain, Champion)",
+      "Map stakeholders and relationships",
+      "Use SPIN questioning techniques (Situation, Problem, Implication, Need-payoff)",
+      "Apply neuroscience-backed interaction techniques",
+      "Qualify with AI-driven insights"
+    ]
+  },
+  C: {
+    name: "Challenge",
+    description: "Present solutions and challenge client perceptions.",
+    techniques: [
+      "Present configurable solutions tailored to client needs",
+      "Apply the Challenger approach to shape buyer perceptions",
+      "Reframe problems and offer unique insights",
+      "Use AI-assisted content personalization",
+      "Teach customers something new about their business"
+    ]
+  },
+  E: {
+    name: "Execute",
+    description: "Manage the sales process and overcome objections.",
+    techniques: [
+      "Manage long sales cycles with Mutual Action Plans",
+      "Navigate multiple decision-makers effectively",
+      "Handle objections with data-driven insights",
+      "Use AI-driven negotiation support",
+      "Structure deals creatively to overcome obstacles"
+    ]
+  },
+  R: {
+    name: "Retain",
+    description: "Maintain and grow client relationships.",
+    techniques: [
+      "Implement AI-powered customer retention strategies",
+      "Conduct effective Quarterly Business Reviews",
+      "Leverage executive sponsorship appropriately",
+      "Apply continuous training and knowledge sharing",
+      "Execute targeted upselling strategies"
+    ]
+  }
+};
+
+// Scenario-specific goals for each PACER stage
+const stageGoals = {
+  P: "Identify a high-potential lead and establish initial contact.",
+  A: "Qualify the prospect and understand their specific pain points.",
+  C: "Present your solution and reshape the prospect's perception of what they need.",
+  E: "Navigate objections and move the deal toward closure.",
+  R: "Strengthen the relationship and identify upselling opportunities."
+};
+
+const GameSession = () => {
+  // console.log("--- GameSession Component Re-rendering ---"); 
+
+  const { sessionId } = useParams();
+  const navigate = useNavigate();
+  const theme = useTheme();
+  
+  // console.log("GameSession component initialized with sessionId:", sessionId);
+  // console.log("Current URL:", window.location.href);
+  // console.log("Route path:", window.location.pathname);
+  
+  // References
+  const messagesEndRef = useRef(null);
+  const messagesContainerRef = useRef(null);
+  const ws = useRef(null);
+  const initializationRef = useRef(false);
+  
+  // Basic session state
+  const [messages, setMessages] = useState([]);
+  const [userDraft, setUserDraft] = useState('');
+  const [aiDraft,   setAiDraft]   = useState('');
+  const [sessionData, setSessionData] = useState(null);
+  const [client, setClient] = useState({
+    name: '',
+    role: '',
+    company: '',
+    industry: '',
+    background: '',
+    painPoints: [],
+    objectives: []
+  });
+  const [sessionComplete, setSessionComplete] = useState(false);
+  const [isResponseLoading, setIsResponseLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [loadingMessage, setLoadingMessage] = useState('Loading session...');
+  const [error, setError] = useState(null);
+  const [voiceMode, setVoiceMode] = useState(false);
+  const [isAudioEnabled, setIsAudioEnabled] = useState(false);
+  const [isWebSocketConnected, setIsWebSocketConnected] = useState(false);
+  const [isRealtimeMode, setIsRealtimeMode] = useState(false);
+  const [timeRemaining, setTimeRemaining] = useState(0);
+  const [isTimedSession, setIsTimedSession] = useState(false);
+  const [completeDialogOpen, setCompleteDialogOpen] = useState(false);
+  const [showFeedbackDialog, setShowFeedbackDialog] = useState(false);
+  const [showMobileWarning, setShowMobileWarning] = useState(false);
+  const [feedback, setFeedback] = useState(null);
+  const [sessionScores, setSessionScores] = useState({
+    overall: 0,
+    methodology: 0,
+    rapport: 0,
+    progress: 0,
+    outcome: 0
+  });
+  // State for scenario context used by realtime voice
+  const [scenarioContext, setScenarioContext] = useState(null);
+  
+  // Additional state variables - moved from below
+  const [currentScore, setCurrentScore] = useState(0);
+  const [evaluationTooltips, setEvaluationTooltips] = useState({});
+  const timerRef = useRef(null);
+  const [isPaused, setIsPaused] = useState(false);
+  const [isManuallyPaused, setIsManuallyPaused] = useState(false);
+  const [remainingPauses, setRemainingPauses] = useState(2);
+  const [previousScore, setPreviousScore] = useState(null);
+  const [pillarScores, setPillarScores] = useState({
+    exec: 0,
+    meth: 0,
+    prog: 0
+  });
+  const [goalProgress, setGoalProgress] = useState({
+    current: 0,
+    target: 80
+  });
+  const [finalScore, setFinalScore] = useState(0);
+  const [sessionDuration, setSessionDuration] = useState(0);
+  const [timerRunning, setTimerRunning] = useState(true);
+  const [expandedAccordion, setExpandedAccordion] = useState(null);
+  const [timerInitialized, setTimerInitialized] = useState(false);
+  const [pauseLoading, setPauseLoading] = useState(false); // Add specific pause button loading state
+  
+  // Snackbar for notifications
+  const [snackbar, setSnackbar] = useState({
+    open: false,
+    message: '',
+    severity: 'info'
+  });
+  
+  // Function to show snackbar notifications
+  const handleSnackbar = useCallback((message, severity = 'info') => {
+    setSnackbar({
+      open: true,
+      message,
+      severity
+    });
+  }, []); // useCallback ensures this function doesn't change unnecessarily
+  
+  // Toggle audio mode between text and voice input
+  const toggleAudioMode = (event) => {
+    const checked = event.target.checked;
+    setVoiceMode(checked);
+    
+    handleSnackbar(
+      checked 
+        ? 'Voice mode enabled. Click the microphone to speak.' 
+        : 'Voice mode disabled',
+      'info'
+    );
+    
+    // When toggling voice mode off, make sure realtime mode is disabled to avoid collision
+    if (!checked && isRealtimeMode) {
+      setIsRealtimeMode(false);
+    }
+    
+    // When standard voice mode is enabled, ensure realtime mode is off to avoid collision
+    // This will use the existing voice transport state management system
+    if (checked && isRealtimeMode) {
+      setIsRealtimeMode(false);
+    }
+  };
+  
+  // WebSocket initialization for voice mode
+  const initializeWebSocket = async () => {
+    try {
+      // Skip if realtime mode is active - prevent collision
+      if (isRealtimeMode) {
+        console.log('Skipping standard WebSocket initialization because realtime mode is active');
+        return;
+      }
+      
+      // Get WebSocket URL from API
+      const wsUrl = await apiService.sessions.getAudioStreamUrl(sessionId);
+      console.log('Connecting to WebSocket:', wsUrl);
+      
+      if (!wsUrl) {
+        handleSnackbar('Failed to get WebSocket URL', 'error');
+        setIsAudioEnabled(false);
+        return;
+      }
+      
+      // Clear any previous connection
+      if (ws.current) {
+        ws.current.close();
+        ws.current = null;
+      }
+      
+      // Create new WebSocket connection
+      const newWs = new WebSocket(wsUrl);
+      ws.current = newWs;
+      
+      newWs.onopen = () => {
+        console.log('WebSocket connection opened');
+        setIsWebSocketConnected(true);
+        handleSnackbar('Audio streaming connected', 'success');
+      };
+      
+      newWs.onclose = () => {
+        console.log('WebSocket connection closed');
+        setIsWebSocketConnected(false);
+      };
+      
+      newWs.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        handleSnackbar('Error connecting to audio service', 'error');
+        setIsWebSocketConnected(false);
+        setIsAudioEnabled(false);
+      };
+    } catch (error) {
+      console.error('Error initializing WebSocket:', error);
+      handleSnackbar('Failed to initialize audio streaming', 'error');
+    }
+  };
+
+  // Load session data from API
+  const loadSessionData = useCallback(async () => {
+    if (!sessionId) return;
+    
+    try {
+      setLoading(true);
+      setError('');
+      
+      // Fetch session data
+      console.log(`GameSession: Loading session data for ID ${sessionId}`);
+      const data = await apiService.sessions.getById(sessionId);
+      
+      // Set session data and check if complete
+      setSessionData(data);
+      setSessionComplete(!!data.is_completed);
+      
+      // Load client persona if available
+      if (data.client_persona) {
+        // Only try to get score data for completed sessions
+        if (data.is_completed) {
+          console.log("Loading final scores from backend for completed session...");
+          try {
+            // Get the official score from the backend
+            const scoreData = await apiService.sessions.getScore(sessionId);
+            console.log("Loaded final score data from backend:", {
+              current: scoreData.total_score,
+              methodology: scoreData.methodology_score,
+              rapport: scoreData.rapport_score,
+              progress: scoreData.progress_score,
+              outcome: scoreData.outcome_score
+            });
+            
+            // Use backend scores as the source of truth for completed sessions
+            setCurrentScore(scoreData.total_score || 0);
+            setFinalScore(scoreData.total_score || 0);
+            
+            setSessionScores({
+              overall: scoreData.total_score || 0,
+              methodology: scoreData.methodology_score || 0,
+              rapport: scoreData.rapport_score || 0,
+              progress: scoreData.progress_score || 0,
+              outcome: scoreData.outcome_score || 0
+            });
+            
+            setPillarScores({
+              exec: scoreData.rapport_score || 0,
+              meth: scoreData.methodology_score || 0,
+              prog: ((scoreData.progress_score || 0) + (scoreData.outcome_score || 0)) / 2
+            });
+          } catch (error) {
+            // If score data isn't available yet even for completed session
+            console.log("Score data not available for completed session:", error.message);
+          }
+        } else {
+          // For active sessions, we'll calculate scores from evaluations instead of fetching
+          console.log("Active session - scores will be calculated from evaluations");
+        }
+      }
+      
+      // For completed sessions, set the final score from sessionData.total_score
+      if (data.is_completed && data.total_score !== undefined) {
+        setFinalScore(data.total_score);
+        setCurrentScore(data.total_score);
+      }
+      
+      // Calculate session duration for completed sessions
+      if (data.is_completed && data.end_time && data.start_time) {
+        try {
+          const startDate = new Date(data.start_time);
+          const endDate = new Date(data.end_time);
+          const duration = Math.round((endDate - startDate) / 1000);
+          console.log(`Session duration calculated: ${duration} seconds from ${startDate} to ${endDate}`);
+          setSessionDuration(duration > 0 ? duration : 0);
+        } catch (err) {
+          console.error("Error calculating session duration:", err);
+          setSessionDuration(0);
+        }
+      }
+      
+      // Extract client info
+      console.log("Session data received:", data);
+
+      // Client data is in data.scenario.client_personas[0] for most scenarios
+      let clientData = {};
+      if (data.scenario && data.scenario.client_personas && data.scenario.client_personas.length > 0) {
+        // Get the first client persona
+        clientData = data.scenario.client_personas[0];
+        console.log("Found client persona:", clientData);
+      } else if (data.client) {
+        clientData = data.client;
+      } else {
+        clientData = data;
+      }
+      
+      // Format challenges and objectives which could be arrays or strings
+      const formatList = (value) => {
+        if (Array.isArray(value)) return value.join(', ');
+        return value || '';
+      };
+
+      const challenges = clientData.challenges || clientData.pain_points || clientData.client_challenges || '';
+      const objectives = clientData.objectives || clientData.goals || clientData.client_objectives || '';
+      
+      setClient({
+        name: clientData.name || clientData.client_name || 'Unknown Client',
+        role: clientData.role || clientData.client_role || 'Unknown Role',
+        company: clientData.company || clientData.client_company || 'Unknown Company',
+        industry: clientData.industry || clientData.client_industry || 'Unknown Industry',
+        background: clientData.background || clientData.client_background || 'No background available',
+        challenges: formatList(challenges) || 'No specific challenges mentioned.',
+        objectives: formatList(objectives) || 'No specific objectives mentioned'
+      });
+      
+      // Also update scenario context with similar fallback logic
+      setScenarioContext({
+        clientName: clientData.name || clientData.client_name || 'Unknown Client',
+        clientRole: clientData.role || clientData.client_role || 'Unknown Role',
+        clientCompany: clientData.company || clientData.client_company || 'Unknown Company',
+        clientIndustry: clientData.industry || clientData.client_industry || 'Unknown Industry',
+        pacerStage: data.current_stage || data.pacer_stage || 'P',
+        productFocus: data.product_focus || data.product || ''
+      });
+      
+      // Check if there are any messages to load
+      if (data.interactions && data.interactions.length > 0) {
+        const formattedMessages = data.interactions.map(interaction => [
+          { sender: 'user', text: interaction.player_input || '' },
+          { sender: 'assistant', text: interaction.ai_response || '' }
+        ]).flat().filter(msg => msg.text.trim() !== '');
+        
+        // Set formatted messages
+        setMessages(formattedMessages);
+      }
+      
+      console.log("Session data load complete, component initialized.");
+      
+    } catch (err) {
+      console.error('Error loading session data:', err);
+      setError('Failed to load session data. Please refresh or try again later.');
+    } finally {
+      setLoading(false);
+    }
+  }, [sessionId]);
+  
+  // Add a message to the conversation
+  // Supports either (text: string, sender: string)
+  // or single object { role, content } from the voice hook
+  const addMessage = useCallback((arg1, arg2) => {
+    let sender, text;
+    if (typeof arg1 === 'object' && arg1 !== null) {
+      // hook called addMessage({ role, content })
+      sender = arg1.role === 'assistant' ? 'client' : arg1.role;
+      text = arg1.content;
+    } else {
+      // normal call: addMessage(text, sender)
+      text = arg1;
+      sender = arg2;
+    }
+    if (!text || (typeof text === 'string' && !text.trim())) return;
+    setMessages(prev => [
+      ...prev,
+      { sender, text, timestamp: new Date() }
+    ]);
+  }, []);
+
+  const handleTranscriptReady = useCallback((segments) => {
+    // Simply display the received segments in the UI
+    segments.forEach(({ sender, text }) => {
+      addMessage(text, sender);
+    });
+    
+    // No need to fetch additional transcripts - they're saved as regular interactions
+    // and will be loaded when the session data is refreshed
+  }, [addMessage]);
+  
+  const handleUserTranscriptChunk = useCallback(chunk => {
+    // accumulate into your local `userDraft` field (green bubble in progress)
+    setUserDraft(i => i + chunk);
+  }, [setUserDraft]);
+
+  // Process evaluation data from stream responses to update scores in real-time
+  const processEvaluationData = useCallback((evaluation) => {
+    if (!evaluation) return;
+    
+    console.log("Processing evaluation data:", evaluation);
+    
+    // Extract scores from evaluation object
+    const methodologyScore = evaluation.methodology_score || 0;
+    const rapportScore = evaluation.rapport_score || 0;
+    const progressScore = evaluation.progress_score || 0;
+    const outcomeScore = evaluation.outcome_score || 0;
+    
+    // Store raw scores
+    setSessionScores(prev => ({
+      overall: (prev.overall + methodologyScore + rapportScore + progressScore + outcomeScore) / 5, // Simple average of all scores
+      methodology: methodologyScore,
+      rapport: rapportScore,
+      progress: progressScore,
+      outcome: outcomeScore
+    }));
+    
+    // Use the same weights as the backend (from game.py)
+    const weights = {
+      methodology: 0.40, // 40%
+      rapport: 0.25,     // 25%
+      progress: 0.20,    // 20%
+      outcome: 0.15      // 15%
+    };
+    
+    // Calculate quality score exactly like the backend
+    const quality = 
+      weights.methodology * methodologyScore +
+      weights.rapport * rapportScore +
+      weights.progress * progressScore +
+      weights.outcome * outcomeScore;
+    
+    // Update current score with EMA (exponential moving average)
+    setCurrentScore(prev => {
+      const alpha = 0.88; // Weight for new value (same as backend)
+      return prev === 0 ? quality : alpha * quality + (1 - alpha) * prev;
+    });
+    
+    // Update pillar scores
+    setPillarScores({
+      exec: rapportScore,
+      meth: methodologyScore,
+      prog: (progressScore + outcomeScore) / 2
+    });
+    
+    // Calculate projected final score using same backend logic
+    const sessionTimeLimit = sessionData?.time_limit_seconds || 300;
+    const difficulty = sessionData?.difficulty || 1;
+    
+    // 1. Estimate goal bonus based on outcome score (similar to backend)
+    let goalBonus = 0;
+    if (outcomeScore >= 80) {
+      goalBonus = 15;  // Goal fully achieved
+    } else if (outcomeScore >= 50) {
+      goalBonus = 8;   // Goal partially achieved
+    }
+    
+    // 2. Calculate time bonus (between 0.9 and 1.1) - same as backend
+    const elapsedTime = sessionTimeLimit - timeRemaining;
+    let timeBonus = 1.0;
+    
+    if (elapsedTime <= sessionTimeLimit) {
+      // Under time limit - bonus up to 10%
+      timeBonus = 1 + (sessionTimeLimit - elapsedTime) / sessionTimeLimit * 0.10;
+    } else {
+      // Over time limit - penalty up to 10%
+      timeBonus = 1 - (elapsedTime - sessionTimeLimit) / sessionTimeLimit * 0.10;
+    }
+    
+    // Clamp time bonus between 0.9 and 1.1 - exactly like backend
+    timeBonus = Math.min(Math.max(timeBonus, 0.9), 1.1);
+    
+    // 3. Difficulty factor - convert difficulty level to multiplier
+    const difficultyFactor = difficulty || 1.0;
+    
+    // 4. Calculate final score - this matches the backend code exactly
+    let projectedFinalScore = Math.round(
+      quality * timeBonus * difficultyFactor
+    ) + goalBonus;
+    
+    // 5. Clamp between 0 and 100 - same as backend
+    projectedFinalScore = Math.min(Math.max(projectedFinalScore, 0), 100);
+    
+    setFinalScore(projectedFinalScore);
+    
+    console.log("Updated scores from evaluation:", {
+      quality,
+      goalBonus,
+      timeBonus,
+      difficultyFactor,
+      projectedFinal: projectedFinalScore
+    });
+    
+    // Also update the evaluation tooltips for feedback
+    if (evaluation.feedback) {
+      setEvaluationTooltips(prev => ({
+        ...prev,
+        [Date.now()]: evaluation.feedback
+      }));
+    }
+  }, [sessionData, timeRemaining, setSessionScores, setCurrentScore, setPillarScores, setFinalScore, setEvaluationTooltips]);
+
+  // Send a User message
+  const handleSendMessage = useCallback(async () => {
+    // Don't allow sending messages if session is paused, completed, or already loading a response
+    if (!userDraft.trim() || isResponseLoading || sessionComplete || isPaused) return;
+    
+    const messageText = userDraft.trim();
+    setUserDraft('');
+    setIsResponseLoading(true);
+    // Add user message to the conversation
+    addMessage(messageText, 'user');
+    
+    // Generate a unique ID for this conversation to prevent duplication
+    const conversationId = Date.now().toString();
+
+    // Use streaming only if not in realtime or voice mode
+    if (!isRealtimeMode && !voiceMode) {
+      // Add a placeholder for the streaming client message
+      setMessages(prev => [
+        ...prev,
+        {
+          sender: 'client',
+          text: '',
+          timestamp: new Date(),
+          _id: conversationId // Add ID to track this conversation
+        }
+      ]);
+      
+      // Flag to track if final chunk has been received
+      let hasReceivedFinalChunk = false;
+      // Store final message for verification before streaming ends
+      let finalMessage = null;
+      
+      try {
+        console.log(`[STREAM ${conversationId}] Starting streaming for message:`, messageText);
+        await apiService.sessions.streamInteractFetch(
+          sessionId,
+          { message: messageText },
+          (chunk) => {
+            // Skip processing if we've already received the final chunk
+            if (hasReceivedFinalChunk) {
+              console.log(`[STREAM ${conversationId}] Ignoring chunk, final already received:`, chunk);
+              return;
+            }
+            
+            console.log(`[STREAM ${conversationId}] Chunk received:`, chunk);
+            
+            // Robustly handle streamed chunk
+            setMessages(prev => {
+              // Find our specific conversation by ID
+              const lastClientIdx = prev.map((m, i) => ({...m, i}))
+                .reverse()
+                .find(m => m.sender === 'client' && m._id === conversationId)?.i;
+              
+              if (lastClientIdx === undefined) {
+                console.warn(`[STREAM ${conversationId}] Cannot find our conversation in messages`);
+                return prev;
+              }
+              
+              const newMessages = [...prev];
+              let appendText = '';
+              
+              // --- Enhanced streamed chunk handler with deduplication ---
+              if (typeof chunk === 'object' && chunk !== null) {
+                // Handle final chunk with is_final flag
+                if (typeof chunk.text === 'string' && chunk.is_final) {
+                  console.log(`[STREAM ${conversationId}] Final chunk received with text:`, chunk.text);
+                  
+                  // Save final message and mark final chunk received
+                  finalMessage = chunk.text;
+                  hasReceivedFinalChunk = true;
+                  
+                  // Process evaluation data if available to update scores immediately
+                  if (chunk.evaluation) {
+                    processEvaluationData(chunk.evaluation);
+                  }
+                  
+                  // Just replace the message text
+                  newMessages[lastClientIdx] = {
+                    ...newMessages[lastClientIdx],
+                    text: chunk.text,
+                  };
+                  return newMessages;
+                } 
+                // Handle streaming chunks
+                else if (typeof chunk.chunk === 'string') {
+                  appendText = chunk.chunk;
+                }
+                else if (chunk.message) {
+                  appendText = chunk.message;
+                } else if (chunk.content) {
+                  appendText = chunk.content;
+                } else if (typeof chunk.choices === 'object' && chunk.choices[0]?.delta?.content) {
+                  appendText = chunk.choices[0].delta.content;
+                } else if (chunk.status === 'complete') {
+                  // Backend sent completion status
+                  console.log(`[STREAM ${conversationId}] Received completion status`);
+                  hasReceivedFinalChunk = true;
+                  return newMessages;
+                } else if (chunk.status) {
+                  // Other status, ignore
+                  return newMessages;
+                } else {
+                  console.warn(`[STREAM ${conversationId}] Unexpected chunk object:`, chunk);
+                  return newMessages;
+                }
+              } else if (typeof chunk === 'string') {
+                appendText = chunk;
+              } else {
+                console.warn(`[STREAM ${conversationId}] Unexpected chunk type:`, chunk);
+                return newMessages;
+              }
+              
+              // Only append text if there's something to append
+              if (appendText) {
+                newMessages[lastClientIdx] = {
+                  ...newMessages[lastClientIdx],
+                  text: (newMessages[lastClientIdx].text || '') + appendText,
+                };
+              }
+              
+              return newMessages;
+            });
+          }
+        );
+        
+        // Reload session data to get updated scores
+        console.log("Stream complete, reloading session data to update scores...");
+        await loadSessionData();
+      } catch (error) {
+        console.error('Error in stream interaction:', error);
+        setError('An error occurred while processing your message.');
+        handleSnackbar('Failed to process message', 'error');
+      } finally {
+        setIsResponseLoading(false);
+      }
+    } else {
+      // For non-streaming mode, use standard interact call
+      try {
+        await apiService.sessions.interact(sessionId, { message: messageText });
+        await loadSessionData(); // Reload to get interaction and updated score
+      } catch (error) {
+        console.error('Error in interaction:', error);
+        handleSnackbar('Failed to process message', 'error');
+      } finally {
+        setIsResponseLoading(false);
+      }
+    }
+  }, [addMessage, sessionId, userDraft, isResponseLoading, sessionComplete, isRealtimeMode, voiceMode, loadSessionData, handleSnackbar, isPaused, processEvaluationData]);
+  
+
+  const handleUserTranscriptComplete = useCallback(fullText => {
+    // 1) show the finished bubble
+    addMessage(fullText, 'user');
+  
+    // 2) persist it into sessionData.interactions
+    setSessionData(prev => ({
+      ...prev,
+      interactions: [
+        ...prev.interactions,
+        {
+          player_input: fullText,
+          ai_response:   null,
+          timestamp:     new Date().toISOString(),
+          evaluation:    null
+        }
+      ]
+    }));
+  }, [addMessage, setSessionData]);
+
+  // Timer functions
+  const toggleTimer = () => {
+    setIsTimedSession(prev => !prev);
+  };
+  
+  // Format time display (mm:ss)
+  const formatTime = (seconds) => {
+    if (seconds === null || seconds === undefined) return '--:--';
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+  
+  // Get timer status indicators
+  const getTimerColor = () => {
+    if (sessionComplete || !sessionData) return 'text.primary';
+    
+    if (timeRemaining <= 30) return 'error.main'; // Last 30 seconds
+    if (timeRemaining <= 60) return 'warning.main'; // Last minute
+    return 'text.primary';
+  };
+
+  // Complete the session
+  const completeSession = useCallback(async (skipFeedback = false) => {
+    setLoading(true);
+    setLoadingMessage("Completing session...");
+    
+    try {
+      console.log("Completing session...");
+      
+      // Mark session as complete on backend
+      await apiService.sessions.complete(sessionId);
+      console.log("Session marked as complete on backend");
+      
+      // Fetch updated session data to get official score from backend
+      const updatedData = await apiService.sessions.getById(sessionId);
+      console.log("Updated session data:", updatedData);
+      
+      // Update session with data from backend
+      setSessionData(updatedData);
+      
+      // Update scores with values from backend
+      const backendScore = updatedData.total_score || 0;
+      setCurrentScore(backendScore);
+      setFinalScore(backendScore);
+      
+      // Update session complete status
+      setSessionComplete(true);
+      
+      // Calculate session duration for completed session
+      if (updatedData.start_time && updatedData.completion_time) {
+        const startTime = new Date(updatedData.start_time);
+        const completionTime = new Date(updatedData.completion_time);
+        const durationMs = completionTime - startTime;
+        const durationSeconds = Math.floor(durationMs / 1000);
+        console.log(`Session duration: ${durationSeconds} seconds`);
+        setSessionDuration(durationSeconds);
+      }
+      
+      // Show feedback dialog if not skipped
+      if (!skipFeedback) {
+        setShowFeedbackDialog(true);
+      }
+      
+      setLoading(false);
+      console.log("Session completed successfully");
+    } catch (error) {
+      console.error("Error completing session:", error);
+      setLoading(false);
+      handleSnackbar("Failed to complete session", "error");
+    }
+  }, [sessionId, handleSnackbar, setShowFeedbackDialog]);
+
+  // Update the autoCompleteSession function
+  const autoCompleteSession = useCallback(() => {
+    // Check if session is already completed
+    if (sessionComplete) {
+      console.log("Session already completed, not auto-completing");
+      return;
+    }
+    
+    console.log("Timer expired, auto-completing session");
+    
+    // Auto-complete the session without showing the feedback dialog
+    completeSession(true); // true = skipFeedback
+    
+    // Show notification that session time expired
+    handleSnackbar("Session time expired", "info");
+  }, [sessionComplete, completeSession, handleSnackbar]);
+
+  // Update the timer initialization effect
+  useEffect(() => {
+    if (sessionData?.is_timed && !sessionComplete) {
+      console.log("Initializing timer and pause settings based on session data:", {
+        is_timed: sessionData.is_timed,
+        time_limit_seconds: sessionData.time_limit_seconds,
+        timer_started_at: sessionData.timer_started_at,
+        timer_paused_at: sessionData.timer_paused_at,
+        difficulty: sessionData.difficulty
+      });
+      
+      // Set initial time remaining
+      if (sessionData.time_limit_seconds) {
+        setTimeRemaining(sessionData.time_limit_seconds);
+      }
+      
+      // Check if timer was already started
+      if (sessionData.timer_started_at) {
+        // Timer was already started
+        console.log("Timer was previously started at:", sessionData.timer_started_at);
+        
+        // Check if timer is paused
+        if (sessionData.timer_paused_at) {
+          console.log("Timer is paused at:", sessionData.timer_paused_at);
+          setIsPaused(true);
+          setIsManuallyPaused(true);
+          setTimerRunning(false);
+        } else {
+          // Timer is running, calculate elapsed time
+          const startTime = new Date(sessionData.timer_started_at).getTime();
+          const currentTime = new Date().getTime();
+          const elapsedSeconds = Math.floor((currentTime - startTime) / 1000);
+          
+          // Calculate remaining time
+          const remainingTime = Math.max(0, sessionData.time_limit_seconds - elapsedSeconds);
+          console.log(`Timer started ${elapsedSeconds}s ago, ${remainingTime}s remaining`);
+          
+          setTimeRemaining(remainingTime);
+          setTimerRunning(true);
+          setIsPaused(false);
+        }
+      }
+      
+      // First check localStorage for stored pause count 
+      const storedPauses = localStorage.getItem(`session_${sessionId}_pauses`);
+      if (storedPauses !== null) {
+        const pauseCount = parseInt(storedPauses, 10);
+        console.log(`Loaded ${pauseCount} remaining pauses from localStorage`);
+        setRemainingPauses(pauseCount);
+      } else {
+        // Otherwise calculate based on difficulty
+        let initialPauses = 2; // Default for medium difficulty
+        
+        if (sessionData.difficulty >= 3) {
+          initialPauses = 1; // Hard: only 1 pause
+        } else if (sessionData.difficulty <= 1) {
+          initialPauses = 3; // Easy: 3 pauses
+        }
+        
+        console.log(`Setting initial pause count to ${initialPauses} based on difficulty ${sessionData.difficulty}`);
+        setRemainingPauses(initialPauses);
+        
+        // Update session data with initial pause count
+        setSessionData(prev => ({
+          ...prev,
+          remaining_pauses: initialPauses
+        }));
+        
+        // Store in localStorage for persistence
+        try {
+          localStorage.setItem(`session_${sessionId}_pauses`, initialPauses.toString());
+          console.log(`Initialized remaining pauses in localStorage: ${initialPauses}`);
+        } catch (err) {
+          console.warn('Could not store initial pause count:', err);
+        }
+      }
+      
+      // Set timer as initialized
+      setTimerInitialized(true);
+    }
+  }, [sessionData?.id, sessionComplete, sessionId, setSessionData]);
+
+  // Handle closing feedback dialog
+  const handleCloseFeedback = () => {
+    setShowFeedbackDialog(false);
+  };
+
+  // Handle ending session button click
+  const handleEndSessionClick = () => {
+    setCompleteDialogOpen(true);
+  };
+  
+  // Utility to get color based on score
+  const getScoreColor = (score) => {
+    // Handle undefined or null scores
+    if (score === undefined || score === null) return 'info';
+    
+    if (score >= 80) return 'success';
+    if (score >= 60) return 'info';
+    if (score >= 40) return 'warning';
+    return 'error';
+  };
+
+  // Toggle WebSocket streaming vs HTTP API mode
+  const toggleStreamingMode = (event) => {
+    const enableStreaming = event.target.checked;
+    
+    handleSnackbar(
+      enableStreaming 
+        ? 'Real-time streaming mode enabled' 
+        : 'Using regular API mode for voice',
+      'info'
+    );
+  };
+  
+  // Call the custom hook at the top level
+  const realtimeVoice = useRealtimeVoice({
+    sessionId,
+    handleSnackbar,
+    addMessage,
+    voiceMode,
+    isRealtimeMode,
+    userDraft,
+    aiDraft,
+    setUserDraft,
+    handleSendMessage,
+    sessionComplete,
+    scenarioContext,
+    onTranscriptReady: handleTranscriptReady,
+    onUserTranscriptChunk: handleUserTranscriptChunk,
+    onUserTranscriptComplete: handleUserTranscriptComplete,
+    isPaused,
+  });
+
+  // RESTORE: Original handleRealtimeToggle function completely
+  const handleRealtimeToggle = (event) => {
+    const newValue = event.target.checked;
+    console.log(`GameSession: handleRealtimeToggle received checked value: ${newValue}`);
+    
+    // If enabling realtime mode, make sure standard voice mode is off to avoid collision
+    if (newValue && voiceMode) {
+      setVoiceMode(false);
+      handleSnackbar('Standard voice mode disabled to activate realtime mode', 'info');
+    }
+    
+    // Set the realtime mode state - this will be picked up by useRealtimeVoice effect
+    // to handle transport changes
+    setIsRealtimeMode(newValue);
+
+    // When turning real-time OFF, append the last transcript to the chat
+    if (!newValue && userDraft.trim()) {
+      addMessage(userDraft.trim(), 'user');
+      setUserDraft('');
+    }
+
+    handleSnackbar(
+      newValue 
+        ? 'Real-time voice mode enabled' 
+        : 'Real-time voice mode disabled',
+      'info'
+    );
+  };
+
+  // useEffect for data loading
+  useEffect(() => {
+    // console.log("--- GameSession useEffect [loadSessionData, sessionId] --- Running. Initialization ref:", initializationRef.current);
+    // Only load data once using the ref
+    if (!initializationRef.current && sessionId) {
+      console.log("Initializing session data load...");
+      initializationRef.current = true; // Mark as initialized immediately to prevent duplicate calls
+      
+      loadSessionData()
+        .then(() => {
+          console.log("Session data load complete, component initialized.");
+        })
+        .catch(error => {
+          console.error("Failed to load session data:", error);
+          // Don't reset the ref on failure - we still consider it initialized
+        });
+    }
+  }, [loadSessionData, sessionId]); // Only depend on these values
+  
+  // Scroll to bottom of messages when new ones arrive
+  useEffect(() => {
+    // console.log("--- GameSession useEffect [messages] --- Triggered (Scrolling)"); 
+    if (messagesContainerRef.current) {
+      messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+    }
+  }, [messages]); // Trigger effect whenever messages array changes
+
+  // Effect for component cleanup
+  useEffect(() => {
+    console.log("GameSession component mounted");
+    
+    // Cleanup function for component unmount
+    return () => {
+      console.log("GameSession component unmounting - cleaning up connections");
+      
+      // Close standard WebSocket if open
+      if (ws.current) {
+        console.log("Closing standard WebSocket connection on unmount");
+        try {
+          ws.current.close();
+        } catch (e) {
+          console.error("Error closing WebSocket:", e);
+        }
+        ws.current = null;
+      }
+      
+      // voiceTransport cleanup is handled by the useRealtimeVoice hook's own cleanup
+    };
+  }, []); // Empty dependency array - run only on mount/unmount
+
+  // Toggle pause/resume
+  const togglePause = useCallback(async () => {
+    // Prevent multiple simultaneous clicks
+    if (pauseLoading) {
+      console.log('Toggle pause is already in progress, ignoring additional click');
+      return;
+    }
+    
+    try {
+      setPauseLoading(true);
+      
+      if (isPaused) {
+        // Resuming
+        console.log('Resuming timer...');
+        // First update UI state immediately 
+        setIsPaused(false);
+        setIsManuallyPaused(false);
+        
+        // Then call API
+        await apiService.sessions.startTimer(sessionId);
+      } else {
+        // Only decrement when pausing and if we have pauses left
+        if (remainingPauses > 0) {
+          console.log(`Decremented pauses from ${remainingPauses} to ${remainingPauses - 1}`);
+          const newRemainingPauses = remainingPauses - 1;
+          
+          // First update UI state immediately
+          setRemainingPauses(newRemainingPauses);
+          setIsPaused(true);
+          setIsManuallyPaused(true);
+          
+          // Update session data to maintain state
+          setSessionData(prev => ({
+            ...prev,
+            remaining_pauses: newRemainingPauses
+          }));
+          
+          console.log('Pausing timer...');
+          await apiService.sessions.pauseTimer(sessionId);
+          
+          // Since there's no metadata API, we'll use localStorage for persistence
+          try {
+            localStorage.setItem(`session_${sessionId}_pauses`, newRemainingPauses.toString());
+            console.log(`Saved remaining pauses to localStorage: ${newRemainingPauses}`);
+          } catch (storageError) {
+            console.error('Error saving pause count to localStorage:', storageError);
+          }
+        } else {
+          console.log('No pauses remaining');
+          return; // Exit early if no pauses left
+        }
+      }
+      
+      // Update timer status without reloading the entire session data
+      // This prevents remainingPauses from being reset
+      const response = await apiService.sessions.timerStatus(sessionId);
+      console.log('Timer status response:', response);
+      
+      const status = response.data || response;
+      
+      if (status) {
+        // Handle different possible property formats
+        setTimeRemaining(status.time_remaining_seconds || status.remaining_seconds || 0);
+        setTimerRunning(!status.is_paused && !status.timer_paused_at);
+      }
+      
+    } catch (error) {
+      console.error('Error toggling pause:', error);
+      setError('Failed to toggle pause. Please try again.');
+      
+      // Roll back UI state on error
+      if (isPaused) {
+        setIsPaused(true);
+        setIsManuallyPaused(true);
+      } else {
+        setIsPaused(false);
+        setIsManuallyPaused(false);
+        setRemainingPauses(prev => prev + 1);
+      }
+    } finally {
+      setPauseLoading(false);
+    }
+  }, [isPaused, remainingPauses, sessionId, setError, setSessionData, pauseLoading]);
+
+  // Update the pollTimerStatus function to handle different API response formats
+  const pollTimerStatus = useCallback(async () => {
+    if (sessionComplete || !sessionData?.is_timed) return;
+    
+    try {
+      const response = await apiService.sessions.timerStatus(sessionId);
+      // console.log('Timer status poll raw response:', response);
+      
+      // Handle both response formats - direct or nested in data
+      const status = response.data || response;
+      
+      if (status) {
+        // console.log('Timer status parsed:', status);
+        
+        // Handle different possible property names in the response
+        const remainingSeconds = status.remaining_seconds || 
+                                status.time_remaining_seconds || 
+                                timeRemaining;
+        
+        const isPausedFromServer = !!status.is_paused || 
+                                  !!status.timer_paused_at;
+        
+        // console.log(`Timer status: ${remainingSeconds}s remaining, paused: ${isPausedFromServer}`);
+        
+        setTimeRemaining(remainingSeconds);
+        
+        // Only update isPaused if we haven't manually paused
+        if (!isManuallyPaused) {
+          setIsPaused(isPausedFromServer);
+        }
+        
+        // Auto-complete session when time is up
+        if (remainingSeconds <= 0 && !isPausedFromServer && !sessionComplete) {
+          console.log('Timer expired, auto-completing session');
+          autoCompleteSession();
+        }
+      }
+    } catch (error) {
+      console.error('Error polling timer status:', error);
+    }
+  }, [sessionId, sessionComplete, sessionData?.is_timed, isManuallyPaused, timeRemaining, autoCompleteSession]);
+
+  // Comprehensive timer effect for initialization and countdown
+  useEffect(() => {
+    if (sessionData && !sessionComplete) {
+      const timeLimit = sessionData.time_limit_seconds || 5 * 60; // Default 5 minutes
+
+      // Make sure we have a valid time limit
+      if (!timeLimit || timeLimit <= 0) {
+        console.warn("Invalid time limit detected:", timeLimit);
+        return;
+      }
+
+      console.log(`Initializing timer with time limit: ${timeLimit} seconds`);
+      
+      // Fix timezone issue by properly handling UTC dates from server
+      const parseServerDate = (dateStr) => {
+        if (!dateStr) return null;
+        // Ensure the date string has 'Z' to indicate UTC if not already present
+        const utcStr = dateStr.endsWith('Z') ? dateStr : `${dateStr}Z`;
+        return new Date(utcStr);
+      };
+      const startTime = parseServerDate(sessionData.start_time);
+      const now = new Date();
+      
+      console.log('Timer initialization:', {
+        timeLimit,
+        startTime: startTime.toISOString(),
+        now: now.toISOString(),
+        isPaused: !!sessionData.timer_paused_at,
+        localIsPaused: isPaused
+      });
+      
+      // Calculate elapsed time correctly accounting for timezone
+      const elapsedSoFar = sessionData.timer_paused_at ? 
+        (parseServerDate(sessionData.timer_paused_at) - startTime) / 1000 : 
+        (now - startTime) / 1000;
+      
+      // Calculate remaining time, ensuring it's not negative
+      const remainingTime = Math.max(0, timeLimit - elapsedSoFar);
+      
+      console.log('Timer calculations:', {
+        elapsedSoFar: Math.round(elapsedSoFar),
+        remainingTime: Math.round(remainingTime),
+        isPaused: isPaused
+      });
+      
+      // Initialize timeRemaining with remaining time, not elapsed time
+      setTimeRemaining(remainingTime);
+      
+      // Set the isPaused state based on sessionData (only if frontend doesn't show paused)
+      if (!isPaused) {
+        setIsPaused(!!sessionData.timer_paused_at);
+        setTimerRunning(!sessionData.timer_paused_at);
+      }
+      
+      // Only start the timer if there's time remaining and not paused
+      if (remainingTime > 0 && !sessionData.timer_paused_at && !isPaused) {
+        console.log("Starting timer countdown");
+        const timer = setInterval(() => {
+          setTimeRemaining((prevTime) => {
+            // If session becomes paused, don't decrement the time
+            if (isPaused) {
+              console.log("Timer tick - session is paused, not decrementing time");
+              return prevTime;
+            }
+            
+            const newTime = Math.max(0, prevTime - 1);
+            
+            // Auto-complete when time expires
+            if (newTime <= 0 && !sessionComplete) {
+              console.log("Timer expired, autocompleting session");
+              clearInterval(timer);
+              autoCompleteSession();
+            }
+            
+            return newTime;
+          });
+        }, 1000);
+        
+        // Clear the interval on cleanup
+        return () => {
+          console.log("Clearing timer countdown interval");
+          clearInterval(timer);
+        };
+      } else {
+        // console.log(`Not starting timer countdown: remainingTime=${remainingTime}, isPaused=${isPaused || !!sessionData.timer_paused_at}`);
+      }
+    }
+  }, [sessionData, sessionComplete, autoCompleteSession, isPaused]);
+
+  // Refresh timer status periodically
+  useEffect(() => {
+    // Skip if session is complete or no valid session data
+    if (sessionComplete || !sessionData?.is_timed) return;
+    
+    // Poll timer status initially
+    pollTimerStatus();
+    
+    // Set up interval for regular polling
+    const interval = setInterval(() => {
+      pollTimerStatus();
+    }, 1000);
+    
+    return () => clearInterval(interval);
+  }, [sessionId, sessionComplete, sessionData?.is_timed, pollTimerStatus]);
+
+  // Replace it with a simpler useEffect that updates scores from backend after each interaction
+  useEffect(() => {
+    // Only poll for updated scores if the session is completed
+    // For active sessions, we calculate scores from streaming evaluations
+    if (sessionId && sessionComplete && !loading) {
+      const fetchCurrentScore = async () => {
+        try {
+          console.log("Fetching final score for completed session...");
+          const scoreData = await apiService.sessions.getScore(sessionId);
+          
+          // Check if we got actual score data
+          if (scoreData && Object.keys(scoreData).length > 0) {
+            // Update all score state based on backend data
+            setSessionScores({
+              overall: scoreData.total_score || 0,
+              methodology: scoreData.methodology_score || 0,
+              rapport: scoreData.rapport_score || 0,
+              progress: scoreData.progress_score || 0,
+              outcome: scoreData.outcome_score || 0
+            });
+            
+            // Save previous score for delta display
+            setPreviousScore(currentScore);
+            
+            // Update current score directly from backend
+            setCurrentScore(scoreData.total_score || 0);
+            
+            // Update pillar scores directly from backend
+            setPillarScores({
+              exec: scoreData.rapport_score || 0,
+              meth: scoreData.methodology_score || 0,
+              prog: ((scoreData.progress_score || 0) + (scoreData.outcome_score || 0)) / 2
+            });
+            
+            // For completed sessions, use the final score as is
+            setFinalScore(scoreData.total_score || 0);
+            
+            console.log("Updated final score from backend:", {
+              finalScore: scoreData.total_score
+            });
+          } else {
+            console.log("No meaningful score data available yet for completed session");
+          }
+        } catch (error) {
+          // Don't show errors for expected 404s (no score yet)
+          if (error.response && error.response.status === 404) {
+            console.log("Score endpoint returned 404 - waiting for final scores");
+          } else {
+            console.error("Error fetching updated scores:", error);
+          }
+        }
+      };
+      
+      fetchCurrentScore();
+    }
+  }, [sessionId, sessionComplete, loading, currentScore]);
+
+  // Accordion handler
+  const handleAccordionChange = (panel) => (event, isExpanded) => {
+    setExpandedAccordion(isExpanded ? panel : null);
+  };
+
+  // Move getGoalForPacerStage to proper scope - define it at the component level
+  const getGoalForPacerStage = (stage) => {
+    if (!stage) return 'Build a relationship and understand the client\'s needs.';
+    
+    const goals = {
+      'P': 'Qualify the prospect and identify their business needs.',
+      'A': 'Understand pain points and assess decision criteria.',
+      'C': 'Create value by presenting a tailored solution addressing specific needs.',
+      'E': 'Execute a plan to navigate stakeholders and handle objections.',
+      'R': 'Retain the client by planning ongoing support and expansion opportunities.'
+    };
+    
+    return goals[stage.charAt(0).toUpperCase()] || 'Build a relationship and understand the client\'s needs.';
+  };
+
+  // Enhance the pause button tooltip
+  const getPauseButtonTooltip = () => {
+    if (loading) {
+      return "Loading...";
+    } else if (isPaused) {
+      return "Resume the session timer";
+    } else if (remainingPauses <= 0) {
+      return "You've used all your pause opportunities";
+    } else {
+      return `Pause the session timer (${remainingPauses} pause${remainingPauses !== 1 ? 's' : ''} remaining)`;
+    }
+  };
+
+  // Add getTimerBackgroundColor function - place near other timer-related functions
+  const getTimerBackgroundColor = () => {
+    if (sessionComplete) return 'grey.100';
+    if (isPaused) return 'warning.light';
+    if (timeRemaining <= 30) return 'error.light';
+    if (timeRemaining <= 60) return 'warning.light';
+    return 'success.light';
+  };
+
+  // render the actual component UI
+  // console.log(`--- GameSession Rendering --- Switch 'checked' prop will be: ${isRealtimeMode}`);
+  return (
+    <Container maxWidth="xl" sx={{ py: 4 }}>
+      {/* Session header and controls */}
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 3 }}>
+        <Box>
+          <Typography variant="h4" component="h1" gutterBottom>
+            {loading 
+              ? 'Loading session...' 
+              : (sessionData?.scenario?.title || sessionData?.scenarioTitle || 'Game Session')}
+          </Typography>
+          <Typography variant="subtitle1" color="text.secondary" gutterBottom>
+            {loading
+              ? 'Please wait while we load your session data.'
+              : (sessionData?.scenario?.description || sessionData?.description || '')}
+          </Typography>
+          
+          {/* Session status */}
+          {sessionData && (
+            <Box sx={{ mb: 2, display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
+              <Chip 
+                icon={sessionData.status === 'completed' ? <CheckCircleIcon /> : <TimerIcon />} 
+                label={sessionData.status === 'completed' ? 'Completed' : 'In Progress'}
+                color={sessionData.status === 'completed' ? 'success' : 'primary'}
+                variant="outlined"
+              />
+              
+              {!sessionComplete ? (
+                // For active sessions, show that this is a projected score
+                <Tooltip title="Current projected score based on your interactions so far. The final score may differ when the session is completed.">
+                  <Chip 
+                    icon={<AssessmentIcon />} 
+                    label={`Projected Score: ${Math.round(currentScore || 0)}/100`}
+                    color={getScoreColor(currentScore || 0)}
+                    variant="filled"
+                    sx={{ fontWeight: 'bold' }}
+                  />
+                </Tooltip>
+              ) : (
+                // For completed sessions, show the final official score
+                <Tooltip title="Final official score calculated by the system">
+                  <Chip 
+                    icon={<CheckCircleIcon />} 
+                    label={`Final Score: ${Math.round(finalScore || 0)}/100`}
+                    color={getScoreColor(finalScore || 0)}
+                    variant="filled"
+                    sx={{ fontWeight: 'bold' }}
+                  />
+                </Tooltip>
+              )}
+              
+              <Chip 
+                icon={<EventIcon />} 
+                label={`Created: ${new Date(sessionData.createdAt).toLocaleDateString()}`}
+                variant="outlined"
+                color="default"
+              />
+            </Box>
+          )}
+        </Box>
+
+        {/* Removed duplicate timer display from header */}
+        <Box>
+          <Tooltip title="End this session now">
+            <Button 
+              variant="outlined" 
+              color="error" 
+              size="small" 
+              startIcon={<StopIcon />}
+              onClick={handleEndSessionClick}
+              disabled={sessionComplete}
+            >
+              End Session
+            </Button>
+          </Tooltip>
+        </Box>
+      </Box>
+          
+      {/* Main content grid */}
+      <Grid container spacing={3}>
+        {loading ? (
+          <Grid item xs={12}>
+            <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '60vh' }}>
+              <CircularProgress size={60} />
+              <Typography variant="h6" sx={{ mt: 2 }}>
+                Loading session data...
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                This may take a moment
+              </Typography>
+              {error && (
+                <Alert severity="error" sx={{ mt: 2, maxWidth: '500px' }}>
+                  {error}
+                  <Box sx={{ mt: 1 }}>
+                    <Button variant="outlined" size="small" onClick={loadSessionData}>
+                      Retry
+                    </Button>
+                  </Box>
+                </Alert>
+        )}
+            </Box>
+          </Grid>
+        ) : (
+          <>
+            {/* Left sidebar - Client info */}
+            <Grid item xs={12} md={3}>
+            <Paper 
+                elevation={2}
+              sx={{ 
+                      p: 2, 
+                  height: '100%',
+                  minHeight: { xs: 'auto', md: '600px' }
+                }}
+              >
+                <Typography variant="h6" gutterBottom component="h2" sx={{ display: 'flex', alignItems: 'center' }}>
+                  <InfoIcon sx={{ mr: 1 }} /> Client Information
+                </Typography>
+                
+                <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
+                  <Avatar 
+                    sx={{
+                      mr: 2,
+                      width: 56,
+                      height: 56,
+                      border: realtimeVoice.isClientSpeaking ? `3px solid ${theme.palette.success.main}` : `3px solid transparent`,
+                      boxShadow: realtimeVoice.isClientSpeaking ? `0 0 12px ${theme.palette.success.light}` : 'none',
+                      transition: 'border 0.3s ease-in-out, box-shadow 0.3s ease-in-out',
+                      animation: realtimeVoice.isClientSpeaking ? 'speakingPulse 1.5s infinite ease-in-out' : 'none',
+                      '@keyframes speakingPulse': {
+                        '0%': {
+                          boxShadow: `0 0 8px ${theme.palette.success.light}`,
+                        },
+                        '50%': {
+                          boxShadow: `0 0 16px ${theme.palette.success.main}`,
+                        },
+                        '100%': {
+                          boxShadow: `0 0 8px ${theme.palette.success.light}`,
+                        },
+                      }
+                    }}
+                  >
+                    {client.name ? client.name.charAt(0).toUpperCase() : 'C'} 
+                  </Avatar>
+                  <Box>
+                    <Typography variant="body1" sx={{ fontWeight: 'bold' }}>
+                      {client.name || 'Unknown Client'}
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      {client.role || 'Unknown Role'}
+                    </Typography>
+                  </Box>
+                </Box>
+
+                <Box sx={{ mb: 3 }}>
+                  <Card variant="outlined" sx={{ mb: 2 }}>
+                    <CardContent>
+                      <Typography variant="body2" color="text.secondary">
+                        <strong>Name:</strong> {client.name || 'Unknown Client'}
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        <strong>Role:</strong> {client.role || 'Unknown Role'}
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        <strong>Company:</strong> {client.company || 'Unknown Company'}
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        <strong>Industry:</strong> {client.industry || 'Unknown Industry'}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                  
+                  <Typography variant="subtitle2" gutterBottom>
+                    Client Background
+                  </Typography>
+                  <Typography variant="body2" paragraph>
+                    {client.background || 'No background information available.'}
+                  </Typography>
+                  
+                  <Typography variant="subtitle2" gutterBottom>
+                    Business Challenges
+                  </Typography>
+                  <Typography variant="body2" paragraph>
+                    {client.challenges || 'No specific challenges mentioned.'}
+                  </Typography>
+                  
+                  <Typography variant="subtitle2" gutterBottom>
+                    Objectives
+                  </Typography>
+                  <Typography variant="body2" paragraph>
+                    {client.objectives || 'No specific objectives mentioned.'}
+                  </Typography>
+        </Box>
+                
+                {/* Realtime Mode Switch */}
+                <FormGroup sx={{ mt: 2, mb: 2, borderTop: 1, borderBottom: 1, borderColor: 'divider', py: 1 }}>
+                  <FormControlLabel
+                    control={
+                      <Switch
+                        checked={isRealtimeMode}
+                        onChange={(e) => {
+                          handleRealtimeToggle(e);
+                          realtimeVoice.toggleRealtimeMode(e);
+                        }}
+                        icon={<SettingsVoiceIcon fontSize="small" />}
+                        checkedIcon={<SettingsVoiceIcon fontSize="small" />}
+                        disabled={sessionComplete /* || realtimeVoice.isConnecting */}
+                      />
+                    }
+                    labelPlacement="start"
+                    label="Real-time Voice Mode"
+                    sx={{ justifyContent: 'space-between', ml: 0, mr: 0.5 }}
+                  />
+                </FormGroup>
+                
+                {/* Chat controls */}
+                {realtimeVoice.renderChatControls()}
+              </Paper>
+            </Grid>
+            
+            {/* Main chat area */}
+            <Grid item xs={12} md={6}>
+            <Paper 
+                elevation={2}
+              sx={{ 
+                display: 'flex', 
+                  flexDirection: 'column',
+                  height: { xs: 'auto', md: '80vh' },
+                  minHeight: { xs: 'auto', md: '600px' },
+                }}
+              >
+                {/* Timer and session controls - This is the primary timer that we'll keep */}
+                <Box sx={{ 
+                  p: 2, 
+                  borderBottom: '1px solid rgba(0, 0, 0, 0.12)',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center'
+                }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                    <AccessTimeIcon sx={{ 
+                      mr: 1,
+                      color: getTimerColor(),
+                      animation: timeRemaining <= 60 ? 'pulse 1s infinite' : 'none',
+                      '@keyframes pulse': {
+                        '0%': { opacity: 1 },
+                        '50%': { opacity: 0.5 },
+                        '100%': { opacity: 1 }
+                      }
+                    }} />
+                    <Box display="flex" alignItems="center">
+                      <Typography 
+                        variant="h6" 
+                        sx={{ 
+                          ml: 2,
+                          color: timeRemaining <= 60 ? 'error.main' : 'text.primary',
+                          animation: timeRemaining <= 60 && !isPaused ? 'pulse 2s infinite' : 'none',
+                          '@keyframes pulse': {
+                            '0%': { opacity: 1 },
+                            '50%': { opacity: 0.5 },
+                            '100%': { opacity: 1 },
+                          },
+                        }}
+                      >
+                        {formatTime(timeRemaining)}
+                      </Typography>
+                      
+                      {/* Pause Button */}
+                      {sessionData?.is_timed && !sessionComplete && (
+                        <Tooltip title={getPauseButtonTooltip()}>
+                          <span> {/* Wrap in span to allow tooltip on disabled button */}
+                            <Button
+                              variant="outlined"
+                              color={isPaused ? "success" : "primary"}
+                              size="small"
+                              startIcon={isPaused ? 
+                                (pauseLoading ? <CircularProgress size={16} /> : <PlayArrowIcon />) : 
+                                (pauseLoading ? <CircularProgress size={16} /> : <PauseIcon />)
+                              }
+                              onClick={(e) => {
+                                e.stopPropagation(); // Prevent event bubbling
+                                togglePause();
+                              }}
+                              disabled={pauseLoading || (!isPaused && remainingPauses <= 0)} // Disable when loading or no pauses left
+                              sx={{ 
+                                ml: 2,
+                                position: 'relative',
+                                '&::after': {
+                                  // Display a badge with count
+                                  display: (!isPaused && remainingPauses > 0 && !pauseLoading) ? 'flex' : 'none',
+                                  content: `"${remainingPauses}"`,
+                                  position: 'absolute',
+                                  top: -8,
+                                  right: -8,
+                                  width: 20,
+                                  height: 20,
+                                  borderRadius: '50%',
+                                  backgroundColor: 'primary.main',
+                                  color: 'primary.contrastText',
+                                  fontSize: '0.75rem',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                }
+                              }}
+                            >
+                              {pauseLoading ? 'Processing...' : (isPaused ? "Resume" : "Pause")}
+                            </Button>
+                          </span>
+                        </Tooltip>
+                      )}
+                      
+                    </Box>
+                  </Box>
+                )}
+                
+                {/* Text input or realtime voice input */}
+                {isRealtimeMode ? (
+                  realtimeVoice.renderRealtimeVoiceInput()
+                ) : (
+                  <Box sx={{ p: 2, display: 'flex', alignItems: 'center', gap: 1, borderTop: '1px solid rgba(0, 0, 0, 0.12)' }}>
+                    <TextField
+                      fullWidth
+                      value={userDraft}
+                      onChange={(e) => setUserDraft(e.target.value)}
+                      onKeyPress={(e) => e.key === 'Enter' && !isPaused && handleSendMessage()}
+                      variant="outlined"
+                      placeholder={isPaused ? "Session paused - resume to continue..." : "Type your message..."}
+                      disabled={isResponseLoading || sessionComplete || isPaused}
+                    />
+                    <Button 
+                      variant="contained"
+                      color="primary"
+                      onClick={handleSendMessage}
+                      disabled={!userDraft.trim() || isResponseLoading || sessionComplete || isPaused}
+                      endIcon={<SendIcon />}
+                    >
+                      Send
+                    </Button>
+                  </Box>
+                )}
+              </Paper>
+            </Grid>
+            
+            {/* Right sidebar - PACER & Progress */}
+            <Grid item xs={12} md={3} order={{ xs: 2, md: 3 }}>
+              <Paper 
+                elevation={2}
+                sx={{ 
+                  p: 2, 
+                  height: '100%',
+                  minHeight: { xs: 'auto', md: '600px' },
+                }}
+              >
+                <Typography variant="h6" gutterBottom component="h2" sx={{ display: 'flex', alignItems: 'center' }}>
+                  <AssessmentIcon sx={{ mr: 1 }} /> PACER & Progress
+                </Typography>
+                
+                <ScorePanel 
+                  currentScore={currentScore}
+                  finalScore={finalScore}
+                  executionScore={pillarScores.exec}
+                  methodologyScore={pillarScores.meth}
+                  progressScore={pillarScores.prog}
+                  previousScore={previousScore}
+                  timeRemaining={timeRemaining}
+                  goalTarget={goalProgress.target}
+                  goalCurrent={goalProgress.current}
+                  sessionComplete={sessionComplete}
+                  sessionDuration={sessionDuration}
+                  showTimer={false}
+                  scoreLabel={sessionComplete ? "Final Score (official)" : "Projected Score (EMA)"}
+                />
+                
+                <Box sx={{ mt: 2 }}>
+                  <Typography variant="h6" gutterBottom component="h3" sx={{ display: 'flex', alignItems: 'center' }}>
+                    <FlagIcon fontSize="small" sx={{ mr: 1 }} /> Goal
+                  </Typography>
+                  <Typography variant="body2" sx={{ mb: 1 }}>
+                    {getGoalForPacerStage(scenarioContext?.pacerStage || 'A')}
+                  </Typography>
+                  
+                  <Typography variant="h6" gutterBottom component="h3" sx={{ mt: 2, display: 'flex', alignItems: 'center' }}>
+                    <ScienceIcon fontSize="small" sx={{ mr: 1 }} /> PACER Methodology
+                  </Typography>
+                  
+                  <div>
+                    <Accordion 
+                      expanded={expandedAccordion === 'prospect'} 
+                      onChange={handleAccordionChange('prospect')}
+                      sx={{ mb: 1 }}
+                    >
+                      <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                        <Typography sx={{ display: 'flex', alignItems: 'center', fontWeight: 'bold' }}>
+                          P: Prospect
+                        </Typography>
+                      </AccordionSummary>
+                      <AccordionDetails>
+                        <Typography variant="body2">
+                          In the Prospect stage, identify high-potential leads through referrals, market intelligence, and personalized outreach strategies.
+                        </Typography>
+                        <List dense>
+                          <ListItem>
+                            <ListItemIcon><CheckCircleOutlineIcon color="success" fontSize="small" /></ListItemIcon>
+                            <ListItemText primary="Qualify prospect fit" />
+                          </ListItem>
+                          <ListItem>
+                            <ListItemIcon><CheckCircleOutlineIcon color="success" fontSize="small" /></ListItemIcon>
+                            <ListItemText primary="Identify business needs" />
+                          </ListItem>
+                          <ListItem>
+                            <ListItemIcon><CheckCircleOutlineIcon color="success" fontSize="small" /></ListItemIcon>
+                            <ListItemText primary="Research company background" />
+                          </ListItem>
+                        </List>
+                      </AccordionDetails>
+                    </Accordion>
+                  </div>
+                </Box>
+              </Paper>
+            </Grid>
+          </>
+        )}
+      </Grid>
+      
+      {/* End session dialog */}
+      <Dialog
+        open={completeDialogOpen}
+        onClose={() => setCompleteDialogOpen(false)}
+      >
+        <DialogTitle>End Session</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            Are you sure you want to end this sales session? This will calculate your final score and mark the session as complete.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setCompleteDialogOpen(false)}>Cancel</Button>
+          <Button onClick={completeSession} variant="contained" color="primary">
+            End Session
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Feedback dialog */}
+      <Dialog 
+        open={showFeedbackDialog}
+        onClose={handleCloseFeedback}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle>Session Feedback & Analysis</DialogTitle>
+        <DialogContent>
+          <DialogContentText paragraph>
+            Your session is complete. Here is your performance feedback:
+          </DialogContentText>
+          
+          <FeedbackCard 
+            sessionId={sessionId}
+            scores={sessionScores}
+            loading={loading}
+            feedback={feedback || { 
+              summary: "No feedback available yet.",
+              strengths: [],
+              areas_for_improvement: []
+            }}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button 
+            onClick={() => {
+              handleCloseFeedback();
+              navigate('/sessions');
+            }} 
+            color="primary"
+            startIcon={<ExitToAppIcon />}
+          >
+            Back to Session List
+          </Button>
+        </DialogActions>
+      </Dialog>
+      
+      {/* Mobile device warning dialog */}
+      <Dialog 
+        open={showMobileWarning}
+        onClose={() => setShowMobileWarning(false)}
+      >
+        <DialogTitle>
+          <WarningIcon color="warning" sx={{ mr: 1, verticalAlign: 'middle' }} />
+          Mobile Device Detected
+        </DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            We've detected you're using a mobile device. For the best experience with voice features and interactive elements, 
+            we recommend using a desktop browser.
+          </DialogContentText>
+          <DialogContentText sx={{ mt: 2 }}>
+            You can continue, but some features may have limited functionality.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setShowMobileWarning(false)} color="primary">
+            I Understand
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Snackbar for notifications */}
+      <Snackbar 
+        open={snackbar.open} 
+        autoHideDuration={6000} 
+        onClose={() => setSnackbar({ ...snackbar, open: false })}
+        message={snackbar.message}
+      >
+        <Alert 
+          onClose={() => setSnackbar({ ...snackbar, open: false })}
+          severity={snackbar.severity} 
+          sx={{ width: '100%' }}
+        >
+          {snackbar.message}
+        </Alert>
+      </Snackbar>
+    </Container>
+  ); 
+}
+
+export default GameSession; 
