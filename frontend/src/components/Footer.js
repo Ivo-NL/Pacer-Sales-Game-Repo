@@ -60,10 +60,10 @@ const Footer = () => {
           </Grid>
           <Grid item xs={12} md={6} sx={{ textAlign: { xs: 'left', md: 'right' } }}>
             <Typography variant="body2" sx={{ opacity: 0.9 }}>
-              © {currentYear} My Company
+              © {currentYear} Worldline
             </Typography>
             <Typography variant="body2" sx={{ mt: 0.5, opacity: 0.8 }}>
-              Version 1.0 • All rights reserved
+              Version 1.1 • All rights reserved
             </Typography>
             <Box sx={{ mt: 1.5, display: 'flex', justifyContent: { xs: 'flex-start', md: 'flex-end' } }}>
               <Link href="#" color="inherit" sx={{ mr: 2, opacity: 0.8, '&:hover': { opacity: 1 } }}>
